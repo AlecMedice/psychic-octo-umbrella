@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Generator
 
 try:
@@ -7,6 +8,9 @@ try:
     _GEMINI_OK = True
 except ImportError:
     _GEMINI_OK = False
+
+_last_request_at: float = 0.0
+_MIN_INTERVAL = 4.0   # seconds between requests (free tier: 15 req/min)
 
 
 def agent_configured() -> bool:
@@ -57,13 +61,19 @@ def build_system_prompt(ctx: dict) -> str:
 
 
 def stream_response(messages: list, ctx: dict) -> Generator[str, None, None]:
+    global _last_request_at
+
     if not agent_configured():
         yield "Agent unavailable — add GEMINI_API_KEY to .env to enable."
         return
 
+    # Throttle to respect the free-tier rate limit
+    elapsed = time.time() - _last_request_at
+    if elapsed < _MIN_INTERVAL:
+        time.sleep(_MIN_INTERVAL - elapsed)
+
     client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
 
-    # Convert to Gemini format: roles are "user" / "model"
     contents = [
         types.Content(
             role='model' if m['role'] == 'assistant' else 'user',
@@ -77,13 +87,24 @@ def stream_response(messages: list, ctx: dict) -> Generator[str, None, None]:
         max_output_tokens=400,
     )
 
-    try:
-        for chunk in client.models.generate_content_stream(
-            model='gemini-2.0-flash',
-            contents=contents,
-            config=config,
-        ):
-            if chunk.text:
-                yield chunk.text
-    except Exception as e:
-        yield f"Error: {e}"
+    last_error = None
+    for attempt in range(3):
+        try:
+            _last_request_at = time.time()
+            for chunk in client.models.generate_content_stream(
+                model='gemini-2.0-flash',
+                contents=contents,
+                config=config,
+            ):
+                if chunk.text:
+                    yield chunk.text
+            return
+        except Exception as e:
+            last_error = e
+            if '429' in str(e) and attempt < 2:
+                wait = 4 * (attempt + 1)   # 4s, 8s
+                time.sleep(wait)
+                continue
+            break
+
+    yield f"_(Rate limited — please try again in a moment.)_" if '429' in str(last_error) else f"Error: {last_error}"
