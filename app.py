@@ -7,10 +7,15 @@ from fetcher import (
     WATCHLIST, CHART_PERIODS,
     get_options_chain, get_spot_price, get_iv_rank,
     get_expirations, get_price_history, get_news,
+    get_fear_greed, get_vix_term_structure, get_earnings_date, get_short_interest,
     alpaca_configured,
 )
 from greeks_calc import enrich_with_greeks, VOLLIB_OK
 from agent import agent_configured, stream_response
+from signals import (
+    implied_move, put_call_ratios, iv_skew, unusual_volume,
+    iv_vs_rv, relative_volume, momentum, opportunity_score,
+)
 
 st.set_page_config(page_title="Options Evaluator", page_icon="📈", layout="wide")
 
@@ -49,6 +54,22 @@ def load_summary():
 @st.cache_data(ttl=300, show_spinner=False)
 def load_news(ticker):
     return get_news(ticker)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_fear_greed():
+    return get_fear_greed()
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_vix():
+    return get_vix_term_structure()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_earnings(ticker):
+    return get_earnings_date(ticker)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_short_interest(ticker):
+    return get_short_interest(ticker)
 
 
 # ── Sidebar: ticker + news ─────────────────────────────────────────────────────
@@ -335,6 +356,132 @@ with st.expander("Watchlist — IV Rank", expanded=False):
 st.caption(
     "IV Rank from 52-week realized vol · Greeks via vollib (Black-Scholes) when not from exchange"
 )
+
+# ── Signals sidebar ────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.divider()
+    st.markdown("#### 📊 Trade Signals")
+
+    _fg   = load_fear_greed()
+    _vix  = load_vix()
+    _earn = load_earnings(selected)
+    _si   = load_short_interest(selected)
+    _mom  = momentum(hist)
+    _rv_sig = iv_vs_rv(chain, hist)
+    _pc   = put_call_ratios(chain)
+    _im   = implied_move(chain, spot)
+    _skew = iv_skew(chain, spot)
+    _rvol = relative_volume(hist)
+    _unusual = unusual_volume(chain)
+    _score = opportunity_score(
+        iv_rank, _rv_sig, _pc, _mom, _fg.get('score')
+    )
+
+    # ── Opportunity score ──
+    s = _score['score']
+    direction = _score['direction']
+    dir_color = '#00C805' if direction == 'sell' else ('#0EA5E9' if direction == 'buy' else '#888')
+    dir_label = {'sell': 'Sell Premium', 'buy': 'Buy Premium', 'neutral': 'No Clear Edge'}[direction]
+    bar_pct   = int(s / 10 * 100)
+    st.markdown(
+        f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:6px'>"
+        f"<div style='flex:1;background:#1a1a1a;border-radius:4px;height:8px'>"
+        f"<div style='width:{bar_pct}%;background:{dir_color};border-radius:4px;height:8px'></div></div>"
+        f"<span style='font-size:0.85rem;font-weight:700;color:{dir_color}'>{s:.1f}/10</span>"
+        f"</div>"
+        f"<div style='font-size:0.78rem;color:{dir_color};margin-bottom:2px'><b>{dir_label}</b></div>",
+        unsafe_allow_html=True,
+    )
+    for note in _score['notes']:
+        st.markdown(
+            f"<div style='font-size:0.72rem;color:#888;padding-left:6px'>· {note}</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # ── Key metrics grid ──
+    def _sig_row(label, value, color='#ccc', sub=''):
+        sub_html = f"<span style='color:#555;font-size:0.68rem'> {sub}</span>" if sub else ''
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;font-size:0.78rem;"
+            f"margin-bottom:3px'>"
+            f"<span style='color:#888'>{label}</span>"
+            f"<span style='color:{color};font-weight:600'>{value}{sub_html}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+    if _im is not None:
+        _sig_row("Implied Move", f"±{_im:.1f}%", '#ccc', f"by {expiry}")
+
+    if _pc.get('vol') is not None:
+        pc_v = _pc['vol']
+        pc_color = '#FF5000' if pc_v > 1.3 else ('#00C805' if pc_v < 0.7 else '#888')
+        _sig_row("P/C Ratio (vol)", f"{pc_v:.2f}", pc_color)
+
+    if _rv_sig.get('premium') is not None:
+        prem = _rv_sig['premium']
+        p_color = '#FF5000' if prem > 4 else ('#00C805' if prem < -2 else '#888')
+        _sig_row("IV vs RV (30d)", f"{prem:+.1f}%", p_color,
+                 f"IV {_rv_sig['avg_iv']}% / RV {_rv_sig['rv30']}%")
+
+    if _skew is not None:
+        sk_color = '#FF5000' if _skew > 3 else ('#00C805' if _skew < -1 else '#888')
+        _sig_row("25Δ Skew", f"{_skew:+.1f}%", sk_color,
+                 "put rich" if _skew > 0 else "call rich")
+
+    if _rvol is not None:
+        rv_color = '#FF9500' if _rvol > 1.5 else '#888'
+        _sig_row("Rel Volume", f"{_rvol:.1f}×", rv_color)
+
+    if _mom.get('rsi') is not None:
+        rsi = _mom['rsi']
+        rsi_color = '#FF5000' if rsi > 70 else ('#00C805' if rsi < 35 else '#888')
+        _sig_row("RSI-14", f"{rsi:.0f}", rsi_color)
+
+    if _fg.get('score') is not None:
+        fg_s = _fg['score']
+        fg_color = '#00C805' if fg_s < 30 else ('#FF5000' if fg_s > 70 else '#888')
+        _sig_row("Fear & Greed", f"{fg_s:.0f} — {_fg['rating']}", fg_color)
+
+    # VIX term structure
+    vix_vals = {k: v for k, v in _vix.items() if v is not None}
+    if vix_vals:
+        vix_str = '  '.join(f"{k} {v}" for k, v in vix_vals.items())
+        st.markdown(
+            f"<div style='font-size:0.72rem;color:#555;margin-top:4px'>VIX term: "
+            f"<span style='color:#888'>{vix_str}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+    if _earn:
+        days_to = (pd.Timestamp(_earn) - pd.Timestamp.now()).days
+        earn_color = '#FF9500' if days_to <= 14 else '#555'
+        _sig_row("Next Earnings", _earn, earn_color,
+                 f"{days_to}d" if days_to >= 0 else "passed")
+
+    if _si.get('short_interest'):
+        _sig_row("Short Interest",
+                 f"{_si['short_interest']:,}", '#888',
+                 f"{_si['days_to_cover']:.1f}d cover")
+
+    # ── Unusual activity ──
+    if _unusual:
+        st.markdown(
+            "<div style='font-size:0.75rem;color:#FF9500;margin-top:8px;margin-bottom:4px'>"
+            "⚡ Unusual Activity</div>",
+            unsafe_allow_html=True,
+        )
+        for u in _unusual[:4]:
+            arrow = '▲' if u['type'] == 'call' else '▼'
+            u_color = '#00C805' if u['type'] == 'call' else '#FF5000'
+            iv_str = f"  IV {u['iv']}%" if u['iv'] else ''
+            st.markdown(
+                f"<div style='font-size:0.72rem;color:{u_color};padding-left:4px'>"
+                f"{arrow} {u['type'].upper()} ${u['strike']:.0f} — "
+                f"vol {u['volume']:,} ({u['vol_oi_ratio']:.1f}× OI){iv_str}</div>",
+                unsafe_allow_html=True,
+            )
 
 # ── AI Agent sidebar ───────────────────────────────────────────────────────────
 with st.sidebar:

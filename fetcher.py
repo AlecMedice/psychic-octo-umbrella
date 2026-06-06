@@ -12,6 +12,80 @@ load_dotenv()
 
 WATCHLIST = ['DIS', 'JPM', 'HTZ', 'TMO', 'CAG', 'SPY', 'HOOD', 'BA', 'ORCL']
 
+# VIX term-structure symbols (yfinance)
+VIX_SYMBOLS = {
+    '9D':  '^VIX9D',
+    '1M':  '^VIX',
+    '3M':  '^VIX3M',
+    '6M':  '^VIX6M',
+}
+
+
+def get_vix_term_structure() -> dict:
+    """Spot VIX levels across 4 tenors — free via yfinance."""
+    result = {}
+    for label, sym in VIX_SYMBOLS.items():
+        try:
+            h = yf.Ticker(sym).history(period='1d')
+            result[label] = round(float(h['Close'].iloc[-1]), 2) if not h.empty else None
+        except Exception:
+            result[label] = None
+    return result
+
+
+def get_fear_greed() -> dict:
+    """Fear & Greed Index via feargreedchart.com — free, no key required."""
+    try:
+        resp = requests.get(
+            'https://feargreedchart.com/api/?action=all',
+            headers={'User-Agent': 'Mozilla/5.0'},
+            timeout=8,
+        )
+        data = resp.json()
+        score = float(data.get('score') or data.get('fgi', {}).get('now', {}).get('value', 0))
+        rating = (data.get('rating') or data.get('fgi', {}).get('now', {}).get('valueText', '')).title()
+        return {'score': round(score, 1), 'rating': rating}
+    except Exception:
+        return {'score': None, 'rating': ''}
+
+
+def get_earnings_date(ticker: str) -> str | None:
+    """Next earnings date from yfinance calendar."""
+    try:
+        cal = yf.Ticker(ticker).calendar
+        if cal is None:
+            return None
+        dates = cal.get('Earnings Date', [])
+        if dates:
+            d = dates[0]
+            return str(d.date()) if hasattr(d, 'date') else str(d)
+        return None
+    except Exception:
+        return None
+
+
+def get_short_interest(ticker: str) -> dict:
+    """FINRA short interest — biweekly, free, no key required."""
+    try:
+        resp = requests.get(
+            'https://api.finra.org/data/group/otcmarket/name/equityShortInterest',
+            params={'limit': 1, 'fields': 'issueName,symbolCode,shortInterestQty,daysToCover,settlementDate',
+                    'compareFilters': f'symbolCode:eq:{ticker}'},
+            headers={'Accept': 'application/json'},
+            timeout=10,
+        )
+        rows = resp.json()
+        if rows:
+            r = rows[0]
+            return {
+                'short_interest': int(r.get('shortInterestQty', 0)),
+                'days_to_cover':  round(float(r.get('daysToCover', 0)), 1),
+                'settlement_date': r.get('settlementDate', ''),
+            }
+        return {}
+    except Exception:
+        return {}
+
 _ALPACA_KEY    = os.getenv('ALPACA_API_KEY', '')
 _ALPACA_SECRET = os.getenv('ALPACA_SECRET_KEY', '')
 _ALPACA_BASE   = 'https://data.alpaca.markets/v1beta1'
