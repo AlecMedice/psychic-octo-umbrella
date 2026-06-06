@@ -10,6 +10,7 @@ from fetcher import (
     alpaca_configured,
 )
 from greeks_calc import enrich_with_greeks, VOLLIB_OK
+from agent import anthropic_configured, stream_response
 
 st.set_page_config(page_title="Options Evaluator", page_icon="📈", layout="wide")
 
@@ -331,3 +332,64 @@ with st.expander("Watchlist — IV Rank", expanded=False):
 st.caption(
     "IV Rank from 52-week realized vol · Greeks via vollib (Black-Scholes) when not from exchange"
 )
+
+# ── AI Agent sidebar ───────────────────────────────────────────────────────────
+with st.sidebar:
+    st.divider()
+    st.markdown("#### 🤖 Ask the Agent")
+
+    if not anthropic_configured():
+        st.caption("Add `ANTHROPIC_API_KEY` to `.env` to enable the AI assistant.")
+    else:
+        if 'agent_messages' not in st.session_state:
+            st.session_state.agent_messages = []
+
+        # Build context from computed variables
+        atm_row = side[side['strike'] == atm_strike]
+        _r = atm_row.iloc[0] if not atm_row.empty else None
+        agent_ctx = {
+            'ticker':        selected,
+            'spot':          spot,
+            'iv_rank':       iv_rank,
+            'expiry':        expiry,
+            'atm_strike':    atm_strike,
+            'opt_type':      opt_type,
+            'mark':          float(_r['mark']) if _r is not None else 0.0,
+            'iv':            _r.get('iv')    if _r is not None else None,
+            'delta':         _r.get('delta') if _r is not None else None,
+            'theta':         _r.get('theta') if _r is not None else None,
+            'news_headlines': [n['title'] for n in news_items[:5]],
+        }
+
+        # Display recent conversation (last 6 messages)
+        for msg in st.session_state.agent_messages[-6:]:
+            role_label = "**You:** " if msg['role'] == 'user' else "**Agent:** "
+            st.markdown(
+                f"<div style='font-size:0.78rem;margin-bottom:4px'>{role_label}"
+                f"{msg['content']}</div>",
+                unsafe_allow_html=True,
+            )
+
+        with st.form("agent_form", clear_on_submit=True):
+            user_input = st.text_input(
+                "Ask about this ticker or its options…",
+                label_visibility="collapsed",
+                placeholder="e.g. Is IV rank high? What does delta mean here?",
+            )
+            submitted = st.form_submit_button("Send", use_container_width=True)
+
+        if submitted and user_input.strip():
+            st.session_state.agent_messages.append(
+                {'role': 'user', 'content': user_input.strip()}
+            )
+            with st.spinner(""):
+                reply = ''.join(stream_response(st.session_state.agent_messages, agent_ctx))
+            st.session_state.agent_messages.append(
+                {'role': 'assistant', 'content': reply}
+            )
+            st.rerun()
+
+        if st.session_state.get('agent_messages'):
+            if st.button("Clear chat", use_container_width=True):
+                st.session_state.agent_messages = []
+                st.rerun()
