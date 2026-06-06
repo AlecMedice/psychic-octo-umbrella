@@ -2,7 +2,8 @@ import os
 from typing import Generator
 
 try:
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types
     _GEMINI_OK = True
 except ImportError:
     _GEMINI_OK = False
@@ -60,26 +61,28 @@ def stream_response(messages: list, ctx: dict) -> Generator[str, None, None]:
         yield "Agent unavailable — add GEMINI_API_KEY to .env to enable."
         return
 
-    genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+    client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
 
     # Convert to Gemini format: roles are "user" / "model"
     contents = [
-        {'role': 'model' if m['role'] == 'assistant' else 'user',
-         'parts': [{'text': m['content']}]}
+        types.Content(
+            role='model' if m['role'] == 'assistant' else 'user',
+            parts=[types.Part(text=m['content'])],
+        )
         for m in messages
     ]
 
+    config = types.GenerateContentConfig(
+        system_instruction=build_system_prompt(ctx),
+        max_output_tokens=400,
+    )
+
     try:
-        model = genai.GenerativeModel(
-            model_name='gemini-2.0-flash',
-            system_instruction=build_system_prompt(ctx),
-        )
-        response = model.generate_content(
-            contents,
-            stream=True,
-            generation_config=genai.types.GenerationConfig(max_output_tokens=400),
-        )
-        for chunk in response:
+        for chunk in client.models.generate_content_stream(
+            model='gemini-2.0-flash',
+            contents=contents,
+            config=config,
+        ):
             if chunk.text:
                 yield chunk.text
     except Exception as e:
