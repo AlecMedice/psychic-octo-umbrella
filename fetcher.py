@@ -1,9 +1,11 @@
 import os
 import re
+import calendar
 import requests
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta, timezone
+import feedparser
+from datetime import datetime, timedelta, timezone, date
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -173,7 +175,7 @@ def _time_ago(pub_ts: float = 0, pub_date: str = '') -> str:
     try:
         now = datetime.now(timezone.utc).timestamp()
         if pub_ts:
-            diff = now - pub_ts
+            diff = now - float(pub_ts)
         elif pub_date:
             dt = datetime.fromisoformat(pub_date.replace('Z', '+00:00'))
             diff = now - dt.timestamp()
@@ -188,37 +190,154 @@ def _time_ago(pub_ts: float = 0, pub_date: str = '') -> str:
         return ''
 
 
-def get_news(ticker: str, max_items: int = 10) -> list:
-    """Return recent news articles for ticker (yfinance, no API key needed)."""
+def _make_item(title, url, publisher, ts=0, pub_date='',
+               summary='', source='', sentiment='') -> dict:
+    return {
+        'title':     title,
+        'url':       url,
+        'publisher': publisher,
+        'when':      _time_ago(ts, pub_date),
+        '_ts':       float(ts) if ts else 0.0,
+        'summary':   (summary or '')[:160],
+        'source':    source,
+        'sentiment': sentiment,   # 'Bullish' | 'Bearish' | 'Neutral' | ''
+    }
+
+
+# ── Per-source fetchers ────────────────────────────────────────────────────────
+
+def _news_yfinance(ticker: str, n: int) -> list:
     try:
         raw = yf.Ticker(ticker).news or []
-        items = []
-        for article in raw[:max_items]:
-            # yfinance ≥0.2.50 wraps fields under 'content'; older versions are flat
-            c = article.get('content', article)
+        out = []
+        for a in raw[:n]:
+            c = a.get('content', a)
             title = c.get('title', '')
-            url = (
+            url   = (
                 (c.get('clickThroughUrl') or {}).get('url')
                 or (c.get('canonicalUrl') or {}).get('url')
                 or c.get('link', '')
             )
-            provider = c.get('provider', {})
-            publisher = (
-                provider.get('displayName', '') if isinstance(provider, dict)
-                else c.get('publisher', '')
-            )
-            pub_ts   = c.get('providerPublishTime', 0)
-            pub_date = c.get('pubDate', '')
-            summary  = c.get('summary', c.get('description', ''))
-
+            provider  = c.get('provider', {})
+            publisher = provider.get('displayName', '') if isinstance(provider, dict) else c.get('publisher', '')
+            ts        = c.get('providerPublishTime', 0)
+            pub_date  = c.get('pubDate', '')
+            summary   = c.get('summary', c.get('description', ''))
             if title and url:
-                items.append({
-                    'title':     title,
-                    'url':       url,
-                    'publisher': publisher,
-                    'when':      _time_ago(pub_ts, pub_date),
-                    'summary':   summary[:140] if summary else '',
-                })
-        return items
+                out.append(_make_item(title, url, publisher, ts, pub_date, summary, 'Yahoo Finance'))
+        return out
     except Exception:
         return []
+
+
+def _news_google_rss(ticker: str, n: int) -> list:
+    try:
+        url  = f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
+        feed = feedparser.parse(url)
+        out  = []
+        for e in feed.entries[:n]:
+            parsed_time = e.get('published_parsed')
+            ts = calendar.timegm(parsed_time) if parsed_time else 0
+            # Google News embeds source in title as "Headline - Source"
+            raw_title = e.get('title', '')
+            if ' - ' in raw_title:
+                headline, pub = raw_title.rsplit(' - ', 1)
+            else:
+                headline, pub = raw_title, 'Google News'
+            if headline and e.get('link'):
+                out.append(_make_item(headline, e['link'], pub, ts,
+                                      summary=e.get('summary', ''), source='Google News'))
+        return out
+    except Exception:
+        return []
+
+
+def _news_alpha_vantage(ticker: str, n: int) -> list:
+    key = os.getenv('ALPHA_VANTAGE_KEY', '')
+    if not key:
+        return []
+    try:
+        resp = requests.get(
+            'https://www.alphavantage.co/query',
+            params=dict(function='NEWS_SENTIMENT', tickers=ticker, apikey=key, limit=50),
+            timeout=10,
+        )
+        out = []
+        for a in resp.json().get('feed', [])[:n]:
+            ts = 0
+            tp = a.get('time_published', '')
+            if tp:
+                try:
+                    dt = datetime.strptime(tp, '%Y%m%dT%H%M%S').replace(tzinfo=timezone.utc)
+                    ts = dt.timestamp()
+                except Exception:
+                    pass
+            # Ticker-specific sentiment
+            tk_sent = next(
+                (s for s in a.get('ticker_sentiment', []) if s.get('ticker') == ticker), {}
+            )
+            sentiment = tk_sent.get('ticker_sentiment_label', '')
+            # Normalize to short label
+            if 'Bullish' in sentiment:
+                sentiment = 'Bullish'
+            elif 'Bearish' in sentiment:
+                sentiment = 'Bearish'
+            else:
+                sentiment = 'Neutral' if sentiment else ''
+            if a.get('title') and a.get('url'):
+                out.append(_make_item(
+                    a['title'], a['url'], a.get('source', ''), ts,
+                    summary=a.get('summary', ''),
+                    source='Alpha Vantage', sentiment=sentiment,
+                ))
+        return out
+    except Exception:
+        return []
+
+
+def _news_finnhub(ticker: str, n: int) -> list:
+    key = os.getenv('FINNHUB_KEY', '')
+    if not key:
+        return []
+    try:
+        today    = date.today()
+        week_ago = today - timedelta(days=7)
+        resp = requests.get(
+            'https://finnhub.io/api/v1/company-news',
+            params=dict(symbol=ticker, **{'from': str(week_ago), 'to': str(today)}, token=key),
+            timeout=10,
+        )
+        out = []
+        for a in resp.json()[:n]:
+            if a.get('headline') and a.get('url'):
+                out.append(_make_item(
+                    a['headline'], a['url'], a.get('source', ''),
+                    ts=a.get('datetime', 0),
+                    summary=a.get('summary', ''), source='Finnhub',
+                ))
+        return out
+    except Exception:
+        return []
+
+
+# ── Aggregator ────────────────────────────────────────────────────────────────
+
+def get_news(ticker: str, max_per_source: int = 8) -> list:
+    """Fetch from all configured sources, deduplicate, sort by recency."""
+    raw: list = []
+    raw.extend(_news_yfinance(ticker, max_per_source))
+    raw.extend(_news_google_rss(ticker, max_per_source))
+    raw.extend(_news_alpha_vantage(ticker, max_per_source))
+    raw.extend(_news_finnhub(ticker, max_per_source))
+
+    # Deduplicate on first 60 chars of lowercased title
+    seen, unique = set(), []
+    for item in raw:
+        key = item['title'].lower().strip()[:60]
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(item)
+
+    # Sort newest first
+    unique.sort(key=lambda x: x['_ts'], reverse=True)
+    return unique

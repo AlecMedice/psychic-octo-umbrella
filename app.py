@@ -61,16 +61,38 @@ with st.sidebar:
     st.divider()
     st.markdown("#### 📰 Latest News")
 
+    SOURCE_COLORS = {
+        'Yahoo Finance':  '#6001D2',
+        'Google News':    '#4285F4',
+        'Alpha Vantage':  '#00875A',
+        'Finnhub':        '#FF6B35',
+    }
+    SENTIMENT_ICONS = {
+        'Bullish': '🟢',
+        'Bearish': '🔴',
+        'Neutral': '⚪',
+    }
+
     news_items = load_news(selected)
     if news_items:
         for item in news_items:
-            meta = " · ".join(filter(None, [item['publisher'], item['when']]))
+            src    = item.get('source', '')
+            badge_color = SOURCE_COLORS.get(src, '#555')
+            badge  = f"<span style='background:{badge_color};color:#fff;font-size:0.65rem;padding:1px 5px;border-radius:3px;margin-right:4px'>{src}</span>" if src else ''
+            sent   = item.get('sentiment', '')
+            sent_icon = SENTIMENT_ICONS.get(sent, '')
+            pub    = item.get('publisher', '')
+            when   = item.get('when', '')
+            meta_parts = list(filter(None, [pub, when]))
+            meta   = ' · '.join(meta_parts)
             st.markdown(
                 f"<div class='news-card'>"
-                f"<div class='news-title'><a href='{item['url']}' target='_blank'>"
-                f"{item['title']}</a></div>"
-                f"<div class='news-meta'>{meta}</div>"
-                + (f"<div class='news-meta'>{item['summary']}</div>" if item['summary'] else "")
+                f"<div class='news-title'>"
+                f"<a href='{item['url']}' target='_blank'>{item['title']}</a>"
+                f" {sent_icon}</div>"
+                f"<div class='news-meta'>{badge}{meta}</div>"
+                + (f"<div class='news-meta' style='margin-top:3px'>{item['summary']}</div>"
+                   if item.get('summary') else "")
                 + "</div>",
                 unsafe_allow_html=True,
             )
