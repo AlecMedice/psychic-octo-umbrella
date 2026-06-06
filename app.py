@@ -10,7 +10,7 @@ from fetcher import (
     alpaca_configured,
 )
 from greeks_calc import enrich_with_greeks, VOLLIB_OK
-from agent import anthropic_configured, stream_response
+from agent import agent_configured, stream_response
 
 st.set_page_config(page_title="Options Evaluator", page_icon="📈", layout="wide")
 
@@ -338,8 +338,8 @@ with st.sidebar:
     st.divider()
     st.markdown("#### 🤖 Ask the Agent")
 
-    if not anthropic_configured():
-        st.caption("Add `ANTHROPIC_API_KEY` to `.env` to enable the AI assistant.")
+    if not agent_configured():
+        st.caption("Add `GEMINI_API_KEY` to `.env` to enable the AI assistant.")
     else:
         if 'agent_messages' not in st.session_state:
             st.session_state.agent_messages = []

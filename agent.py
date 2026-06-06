@@ -2,23 +2,14 @@ import os
 from typing import Generator
 
 try:
-    import anthropic
-    _ANTHROPIC_OK = True
+    import google.generativeai as genai
+    _GEMINI_OK = True
 except ImportError:
-    _ANTHROPIC_OK = False
-
-_client = None
+    _GEMINI_OK = False
 
 
-def anthropic_configured() -> bool:
-    return _ANTHROPIC_OK and bool(os.getenv('ANTHROPIC_API_KEY', ''))
-
-
-def _get_client():
-    global _client
-    if _client is None and anthropic_configured():
-        _client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
-    return _client
+def agent_configured() -> bool:
+    return _GEMINI_OK and bool(os.getenv('GEMINI_API_KEY', ''))
 
 
 def build_system_prompt(ctx: dict) -> str:
@@ -39,7 +30,6 @@ def build_system_prompt(ctx: dict) -> str:
         headlines = '\n'.join(f'- {h}' for h in news[:5])
         news_block = f'\n\nRecent headlines for {ticker}:\n{headlines}'
 
-    greeks_block = ''
     parts = []
     if iv_val:
         parts.append(f'IV {float(iv_val)*100:.1f}%')
@@ -49,8 +39,10 @@ def build_system_prompt(ctx: dict) -> str:
         parts.append(f'theta ${float(theta):.4f}/day')
     if mark:
         parts.append(f'mark ${float(mark):.2f}')
-    if parts:
-        greeks_block = f'\nATM {opt_type} ({expiry}, strike ${atm:.2f}): {", ".join(parts)}'
+    greeks_block = (
+        f'\nATM {opt_type} ({expiry}, strike ${atm:.2f}): {", ".join(parts)}'
+        if parts else ''
+    )
 
     return (
         f"You are a concise options-trading assistant. The user is currently viewing {ticker} "
@@ -64,21 +56,31 @@ def build_system_prompt(ctx: dict) -> str:
 
 
 def stream_response(messages: list, ctx: dict) -> Generator[str, None, None]:
-    client = _get_client()
-    if client is None:
-        yield "Agent unavailable — add ANTHROPIC_API_KEY to .env to enable."
+    if not agent_configured():
+        yield "Agent unavailable — add GEMINI_API_KEY to .env to enable."
         return
 
-    api_messages = [{'role': m['role'], 'content': m['content']} for m in messages]
+    genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+
+    # Convert to Gemini format: roles are "user" / "model"
+    contents = [
+        {'role': 'model' if m['role'] == 'assistant' else 'user',
+         'parts': [{'text': m['content']}]}
+        for m in messages
+    ]
 
     try:
-        with client.messages.stream(
-            model="claude-opus-4-8",
-            max_tokens=400,
-            system=build_system_prompt(ctx),
-            messages=api_messages,
-        ) as stream:
-            for text in stream.text_stream:
-                yield text
+        model = genai.GenerativeModel(
+            model_name='gemini-2.0-flash',
+            system_instruction=build_system_prompt(ctx),
+        )
+        response = model.generate_content(
+            contents,
+            stream=True,
+            generation_config=genai.types.GenerationConfig(max_output_tokens=400),
+        )
+        for chunk in response:
+            if chunk.text:
+                yield chunk.text
     except Exception as e:
         yield f"Error: {e}"
