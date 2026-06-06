@@ -323,7 +323,7 @@ def _news_finnhub(ticker: str, n: int) -> list:
 def _news_reddit_rss(ticker: str, n: int) -> list:
     """Reddit posts via r/stocks and r/wallstreetbets RSS (no API key needed)."""
     out = []
-    for subreddit in ('stocks', 'wallstreetbets', 'options'):
+    for subreddit in ('stocks', 'options', 'investing'):
         try:
             url  = f"https://www.reddit.com/r/{subreddit}/search.rss?q={ticker}&sort=new&restrict_sr=true"
             feed = feedparser.parse(url)
