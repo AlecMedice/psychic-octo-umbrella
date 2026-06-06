@@ -10,13 +10,17 @@ load_dotenv()
 
 WATCHLIST = ['DIS', 'JPM', 'HTZ', 'TMO', 'CAG', 'SPY', 'HOOD', 'BA', 'ORCL']
 
-_ALPACA_KEY = os.getenv('ALPACA_API_KEY', '')
+_ALPACA_KEY    = os.getenv('ALPACA_API_KEY', '')
 _ALPACA_SECRET = os.getenv('ALPACA_SECRET_KEY', '')
-_ALPACA_BASE = 'https://data.alpaca.markets/v1beta1'
+_ALPACA_BASE   = 'https://data.alpaca.markets/v1beta1'
+
+
+def alpaca_configured() -> bool:
+    return bool(_ALPACA_KEY and _ALPACA_SECRET)
 
 
 def parse_occ_symbol(symbol: str) -> dict:
-    """Parse OCC option symbol format: {TICKER}{YYMMDD}{C/P}{8-digit-strike}"""
+    """Parse OCC option symbol: {TICKER}{YYMMDD}{C/P}{8-digit-strike}"""
     m = re.match(r'([A-Z1-9]+)(\d{6})([CP])(\d{8})', symbol)
     if not m:
         return {}
@@ -65,56 +69,69 @@ def _chain_from_alpaca(ticker: str, expiry: str | None) -> pd.DataFrame:
         parsed = parse_occ_symbol(symbol)
         if not parsed:
             continue
-        greeks = snap.get('greeks') or {}
-        quote = snap.get('latestQuote') or {}
+        greeks    = snap.get('greeks') or {}
+        quote     = snap.get('latestQuote') or {}
+        trade     = snap.get('latestTrade') or {}
+        daily_bar = snap.get('dailyBar') or {}
         rows.append({
-            'symbol': symbol,
+            'symbol':       symbol,
             **parsed,
-            'bid': quote.get('bp') or 0.0,
-            'ask': quote.get('ap') or 0.0,
-            'iv': snap.get('impliedVolatility') or 0.0,
-            'delta': greeks.get('delta') or 0.0,
-            'gamma': greeks.get('gamma') or 0.0,
-            'theta': greeks.get('theta') or 0.0,
-            'vega': greeks.get('vega') or 0.0,
+            'bid':          quote.get('bp') or 0.0,
+            'ask':          quote.get('ap') or 0.0,
+            'last':         trade.get('p') or 0.0,
+            'volume':       daily_bar.get('v') or 0,
+            'iv':           snap.get('impliedVolatility') or 0.0,
+            'delta':        greeks.get('delta') or 0.0,
+            'gamma':        greeks.get('gamma') or 0.0,
+            'theta':        greeks.get('theta') or 0.0,
+            'vega':         greeks.get('vega') or 0.0,
             'open_interest': snap.get('openInterest') or 0,
         })
 
     return pd.DataFrame(rows)
 
 
-def _chain_from_yfinance(ticker: str) -> pd.DataFrame:
-    tk = yf.Ticker(ticker)
-    expirations = tk.options
-    if not expirations:
+def _chain_from_yfinance(ticker: str, expiry: str | None = None) -> pd.DataFrame:
+    try:
+        tk = yf.Ticker(ticker)
+        expirations = tk.options
+        if not expirations:
+            return pd.DataFrame()
+
+        exp = expiry if expiry in expirations else expirations[0]
+        chain = tk.option_chain(exp)
+        calls = chain.calls.assign(type='call')
+        puts  = chain.puts.assign(type='put')
+        df = pd.concat([calls, puts], ignore_index=True)
+        df['ticker'] = ticker
+        df['expiry'] = exp
+
+        df = df.rename(columns={
+            'impliedVolatility': 'iv',
+            'openInterest':      'open_interest',
+            'lastPrice':         'last',
+        })
+        for col in ['delta', 'gamma', 'theta', 'vega']:
+            df[col] = None
+
+        keep = ['ticker', 'strike', 'expiry', 'type',
+                'bid', 'ask', 'last', 'volume',
+                'open_interest', 'iv',
+                'delta', 'gamma', 'theta', 'vega']
+        return df[[c for c in keep if c in df.columns]]
+    except Exception:
         return pd.DataFrame()
-
-    expiry = expirations[0]
-    chain = tk.option_chain(expiry)
-    calls = chain.calls.assign(type='call')
-    puts = chain.puts.assign(type='put')
-    df = pd.concat([calls, puts], ignore_index=True)
-    df['ticker'] = ticker
-    df['expiry'] = expiry
-
-    df = df.rename(columns={'impliedVolatility': 'iv', 'openInterest': 'open_interest'})
-    for col in ['delta', 'gamma', 'theta', 'vega']:
-        df[col] = None
-
-    keep = ['ticker', 'strike', 'expiry', 'type', 'bid', 'ask', 'iv',
-            'delta', 'gamma', 'theta', 'vega', 'open_interest']
-    return df[[c for c in keep if c in df.columns]]
 
 
 def get_options_chain(ticker: str, expiry: str | None = None) -> pd.DataFrame:
-    if _ALPACA_KEY and _ALPACA_SECRET:
+    if alpaca_configured():
         try:
             df = _chain_from_alpaca(ticker, expiry)
             if not df.empty:
                 return df
         except Exception:
             pass
-    return _chain_from_yfinance(ticker)
+    return _chain_from_yfinance(ticker, expiry)
 
 
 def get_iv_rank(ticker: str) -> float:
