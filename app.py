@@ -67,6 +67,9 @@ with st.sidebar:
         'Google News':    '#4285F4',
         'Alpha Vantage':  '#00875A',
         'Finnhub':        '#FF6B35',
+        'Reddit':         '#FF4500',
+        'Reddit Buzz':    '#FF4500',
+        'Marketaux':      '#0EA5E9',
     }
     SENTIMENT_ICONS = {
         'Bullish': '🟢',

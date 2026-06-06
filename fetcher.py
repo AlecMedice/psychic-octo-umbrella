@@ -320,6 +320,100 @@ def _news_finnhub(ticker: str, n: int) -> list:
         return []
 
 
+def _news_reddit_rss(ticker: str, n: int) -> list:
+    """Reddit posts via r/stocks and r/wallstreetbets RSS (no API key needed)."""
+    out = []
+    for subreddit in ('stocks', 'wallstreetbets', 'options'):
+        try:
+            url  = f"https://www.reddit.com/r/{subreddit}/search.rss?q={ticker}&sort=new&restrict_sr=true"
+            feed = feedparser.parse(url)
+            for e in feed.entries[:n]:
+                parsed_time = e.get('published_parsed')
+                ts = calendar.timegm(parsed_time) if parsed_time else 0
+                title = e.get('title', '')
+                link  = e.get('link', '')
+                if title and link:
+                    out.append(_make_item(title, link, f'r/{subreddit}', ts,
+                                          summary=e.get('summary', '')[:160],
+                                          source='Reddit'))
+        except Exception:
+            continue
+    return out[:n]
+
+
+def _news_marketaux(ticker: str, n: int) -> list:
+    """Marketaux news with per-article sentiment (free: 100 req/day, no CC)."""
+    key = os.getenv('MARKETAUX_KEY', '')
+    if not key:
+        return []
+    try:
+        resp = requests.get(
+            'https://api.marketaux.com/v1/news/all',
+            params=dict(
+                symbols=ticker,
+                filter_entities='true',
+                language='en',
+                limit=n,
+                api_token=key,
+            ),
+            timeout=10,
+        )
+        out = []
+        for a in resp.json().get('data', [])[:n]:
+            pub_date = a.get('published_at', '')
+            # Extract sentiment for this specific ticker from entity list
+            score = next(
+                (e.get('sentiment_score', 0)
+                 for e in a.get('entities', []) if e.get('symbol') == ticker),
+                0,
+            )
+            if score > 0.1:
+                sentiment = 'Bullish'
+            elif score < -0.1:
+                sentiment = 'Bearish'
+            else:
+                sentiment = 'Neutral'
+            if a.get('title') and a.get('url'):
+                out.append(_make_item(
+                    a['title'], a['url'], a.get('source', ''),
+                    pub_date=pub_date,
+                    summary=a.get('description', ''),
+                    source='Marketaux', sentiment=sentiment,
+                ))
+        return out
+    except Exception:
+        return []
+
+
+def _news_apewisdom(ticker: str) -> list:
+    """ApeWisdom Reddit sentiment rank — synthesised as a pinned news item."""
+    try:
+        resp = requests.get(
+            'https://api.apewisdom.io/v1.0/trending/all-stocks',
+            timeout=10,
+        )
+        rows = resp.json().get('results', [])
+        entry = next((r for r in rows if r.get('ticker') == ticker), None)
+        if not entry:
+            return []
+        rank     = entry.get('rank', '?')
+        mentions = entry.get('mentions', 0)
+        rank_24h = entry.get('rank_24h_ago')
+        if rank_24h and isinstance(rank_24h, int):
+            delta = rank_24h - rank
+            trend = f"▲{delta}" if delta > 0 else (f"▼{abs(delta)}" if delta < 0 else "–")
+        else:
+            trend = ''
+        title = (
+            f"{ticker} is #{rank} on Reddit right now "
+            f"({mentions:,} mentions{', ' + trend + ' vs 24h ago' if trend else ''})"
+        )
+        return [_make_item(title, f'https://apewisdom.io/', 'ApeWisdom',
+                           source='Reddit Buzz')]
+    except Exception:
+        return []
+
+
 # ── Aggregator ────────────────────────────────────────────────────────────────
 
 def get_news(ticker: str, max_per_source: int = 8) -> list:
@@ -329,6 +423,9 @@ def get_news(ticker: str, max_per_source: int = 8) -> list:
     raw.extend(_news_google_rss(ticker, max_per_source))
     raw.extend(_news_alpha_vantage(ticker, max_per_source))
     raw.extend(_news_finnhub(ticker, max_per_source))
+    raw.extend(_news_reddit_rss(ticker, max_per_source))
+    raw.extend(_news_marketaux(ticker, max_per_source))
+    raw.extend(_news_apewisdom(ticker))
 
     # Deduplicate on first 60 chars of lowercased title
     seen, unique = set(), []
