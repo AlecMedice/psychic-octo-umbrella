@@ -3,7 +3,7 @@ import re
 import requests
 import pandas as pd
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -148,3 +148,77 @@ def get_iv_rank(ticker: str) -> float:
         return round(float((cur - lo) / (hi - lo) * 100), 1)
     except Exception:
         return 0.0
+
+
+# Chart period → (yfinance kwargs) mapping
+CHART_PERIODS = {
+    '1D':  dict(period='1d',  interval='5m'),
+    '3D':  dict(start=(datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d'), interval='15m'),
+    '1W':  dict(start=(datetime.now() - timedelta(weeks=1)).strftime('%Y-%m-%d'), interval='30m'),
+    '1M':  dict(period='1mo', interval='1h'),
+    '3M':  dict(period='3mo', interval='1d'),
+    '6M':  dict(period='6mo', interval='1d'),
+}
+
+
+def get_price_history(ticker: str, period_label: str) -> pd.DataFrame:
+    try:
+        kwargs = CHART_PERIODS.get(period_label, CHART_PERIODS['1D'])
+        return yf.Ticker(ticker).history(**kwargs)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _time_ago(pub_ts: float = 0, pub_date: str = '') -> str:
+    try:
+        now = datetime.now(timezone.utc).timestamp()
+        if pub_ts:
+            diff = now - pub_ts
+        elif pub_date:
+            dt = datetime.fromisoformat(pub_date.replace('Z', '+00:00'))
+            diff = now - dt.timestamp()
+        else:
+            return ''
+        if diff < 3600:
+            return f"{int(diff / 60)}m ago"
+        if diff < 86400:
+            return f"{int(diff / 3600)}h ago"
+        return f"{int(diff / 86400)}d ago"
+    except Exception:
+        return ''
+
+
+def get_news(ticker: str, max_items: int = 10) -> list:
+    """Return recent news articles for ticker (yfinance, no API key needed)."""
+    try:
+        raw = yf.Ticker(ticker).news or []
+        items = []
+        for article in raw[:max_items]:
+            # yfinance ≥0.2.50 wraps fields under 'content'; older versions are flat
+            c = article.get('content', article)
+            title = c.get('title', '')
+            url = (
+                (c.get('clickThroughUrl') or {}).get('url')
+                or (c.get('canonicalUrl') or {}).get('url')
+                or c.get('link', '')
+            )
+            provider = c.get('provider', {})
+            publisher = (
+                provider.get('displayName', '') if isinstance(provider, dict)
+                else c.get('publisher', '')
+            )
+            pub_ts   = c.get('providerPublishTime', 0)
+            pub_date = c.get('pubDate', '')
+            summary  = c.get('summary', c.get('description', ''))
+
+            if title and url:
+                items.append({
+                    'title':     title,
+                    'url':       url,
+                    'publisher': publisher,
+                    'when':      _time_ago(pub_ts, pub_date),
+                    'summary':   summary[:140] if summary else '',
+                })
+        return items
+    except Exception:
+        return []
