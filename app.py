@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
+import plotly.express as px
+import yfinance as yf
 
 from fetcher import (
     WATCHLIST, get_options_chain, get_spot_price,
@@ -11,323 +12,287 @@ from greeks_calc import enrich_with_greeks, VOLLIB_OK
 
 st.set_page_config(page_title="Options Evaluator", page_icon="📈", layout="wide")
 
+st.markdown("""
+<style>
+    .block-container { padding-top: 1.2rem; }
+    div[data-testid="metric-container"] { background: #111; border-radius: 8px; padding: 8px 12px; }
+</style>
+""", unsafe_allow_html=True)
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("Controls")
-    selected = st.selectbox("Ticker", WATCHLIST)
-    expirations = get_expirations(selected)
-    expiry = st.selectbox("Expiration", expirations) if expirations else None
-
+    selected = st.selectbox("Watchlist", WATCHLIST)
     st.divider()
-    st.subheader("Chain Filters")
-    show_itm    = st.checkbox("Show ITM", value=True)
-    show_otm    = st.checkbox("Show OTM", value=True)
-    min_oi      = st.number_input("Min Open Interest", min_value=0, value=0, step=100)
-    num_strikes = st.slider("Strikes around ATM", 6, 40, 20)
-
+    min_oi      = st.number_input("Min Open Interest", 0, value=0, step=100)
+    num_strikes = st.slider("Strikes shown", 6, 40, 16)
     st.divider()
-    data_note = "Alpaca + yfinance fallback" if alpaca_configured() else "yfinance (add Alpaca keys for exchange Greeks)"
-    st.caption(f"Data: {data_note}")
+    st.caption("Alpaca + yfinance" if alpaca_configured() else "yfinance (no exchange Greeks)")
 
 
-# ── Data loading ───────────────────────────────────────────────────────────────
+# ── Cached data loaders ────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_summary():
-    rows = []
-    for t in WATCHLIST:
-        rows.append({'Ticker': t, 'Spot': round(get_spot_price(t), 2), 'IV Rank': get_iv_rank(t)})
-    return pd.DataFrame(rows)
+@st.cache_data(ttl=60, show_spinner=False)
+def load_intraday(ticker):
+    tk = yf.Ticker(ticker)
+    hist = tk.history(period='1d', interval='5m')
+    prev = tk.history(period='5d')
+    prev_close = float(prev['Close'].iloc[-2]) if len(prev) >= 2 else None
+    return hist, prev_close
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def load_chain(ticker, exp):
     spot = get_spot_price(ticker)
     df = get_options_chain(ticker, exp)
-    if not df.empty:
-        needs_greeks = 'delta' not in df.columns or df['delta'].isna().all()
-        if needs_greeks and VOLLIB_OK:
-            df = enrich_with_greeks(df, spot)
+    if not df.empty and ('delta' not in df.columns or df['delta'].isna().all()) and VOLLIB_OK:
+        df = enrich_with_greeks(df, spot)
     return df, spot
 
 
-with st.spinner("Loading…"):
-    summary = load_summary()
-    chain, spot = load_chain(selected, expiry)
+@st.cache_data(ttl=300, show_spinner=False)
+def load_watchlist_summary():
+    return pd.DataFrame([
+        {'Ticker': t, 'Spot': round(get_spot_price(t), 2), 'IV Rank': get_iv_rank(t)}
+        for t in WATCHLIST
+    ])
 
-has_exchange_greeks = (
-    not chain.empty
-    and 'delta' in chain.columns
-    and chain['delta'].notna().any()
-    and alpaca_configured()
-)
 
-# ── Header metrics ─────────────────────────────────────────────────────────────
-st.title(f"📈 {selected}")
+# ── Stock header + price chart ─────────────────────────────────────────────────
+with st.spinner(""):
+    intraday, prev_close = load_intraday(selected)
+    iv_rank = get_iv_rank(selected)
 
-iv_rank_row = summary[summary['Ticker'] == selected]
-iv_rank = float(iv_rank_row['IV Rank'].iloc[0]) if not iv_rank_row.empty else 0.0
+spot    = float(intraday['Close'].iloc[-1]) if not intraday.empty else get_spot_price(selected)
+open_px = float(intraday['Open'].iloc[0])   if not intraday.empty else spot
+chg     = spot - open_px
+chg_pct = (chg / open_px * 100) if open_px else 0.0
+is_up   = chg >= 0
+RH_GREEN = "#00C805"
+RH_RED   = "#FF5000"
+color    = RH_GREEN if is_up else RH_RED
+sign     = "+" if is_up else ""
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Spot", f"${spot:.2f}")
-m2.metric("IV Rank", f"{iv_rank:.1f}",
-          delta="Elevated" if iv_rank > 50 else "Low",
-          delta_color="inverse" if iv_rank > 50 else "off")
-m3.metric("Expiration", expiry or "—")
-m4.metric("Greeks", "Exchange" if has_exchange_greeks else "Black-Scholes (local)")
+# Ticker name + price row
+name_col, price_col, stat_col = st.columns([1, 2, 1])
+with name_col:
+    st.markdown(f"## {selected}")
+    st.caption(f"IV Rank: **{iv_rank:.1f}**")
 
-if not VOLLIB_OK and not has_exchange_greeks:
-    st.warning("vollib not installed — Greeks unavailable. Run: `pip install vollib`")
-
-# ── Watchlist IV rank (collapsible) ───────────────────────────────────────────
-with st.expander("Watchlist IV Rank", expanded=False):
-    fig_bar = px.bar(
-        summary.sort_values('IV Rank'),
-        x='IV Rank', y='Ticker', orientation='h',
-        color='IV Rank', color_continuous_scale='RdYlGn_r',
-        range_color=[0, 100],
+with price_col:
+    st.markdown(
+        f"<div style='font-size:2.2rem;font-weight:700;color:{color}'>${spot:.2f}</div>"
+        f"<div style='color:{color}'>{sign}{chg:.2f} ({sign}{chg_pct:.2f}%) today</div>",
+        unsafe_allow_html=True,
     )
-    fig_bar.add_vline(x=50, line_dash='dash', line_color='white',
-                      opacity=0.4, annotation_text="50")
-    fig_bar.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0),
-                          coloraxis_showscale=False)
-    st.plotly_chart(fig_bar, use_container_width=True)
+
+with stat_col:
+    if prev_close:
+        st.metric("Prev Close", f"${prev_close:.2f}")
+
+# Price sparkline
+if not intraday.empty:
+    fig_spark = go.Figure()
+    fig_spark.add_trace(go.Scatter(
+        x=intraday.index, y=intraday['Close'],
+        mode='lines', line=dict(color=color, width=2),
+        fill='tozeroy',
+        fillcolor=f"{'rgba(0,200,5,0.08)' if is_up else 'rgba(255,80,0,0.08)'}",
+    ))
+    if prev_close:
+        fig_spark.add_hline(y=prev_close, line_dash='dot',
+                            line_color='gray', opacity=0.5,
+                            annotation_text="prev close", annotation_position="right")
+    fig_spark.update_layout(
+        height=160, margin=dict(l=0, r=0, t=0, b=0),
+        xaxis=dict(showgrid=False, showticklabels=False, zeroline=False),
+        yaxis=dict(showgrid=False, zeroline=False),
+        plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+        showlegend=False,
+    )
+    st.plotly_chart(fig_spark, use_container_width=True)
 
 st.divider()
 
-# ── Options chain ──────────────────────────────────────────────────────────────
-st.subheader(f"Options Chain — {expiry or 'no expiry selected'}")
-
-if chain.empty:
+# ── Expiration + calls/puts controls ──────────────────────────────────────────
+expirations = get_expirations(selected)
+if not expirations:
     st.warning(f"No options data available for {selected}.")
     st.stop()
 
-calls = chain[chain['type'] == 'call'].drop_duplicates('strike').copy()
-puts  = chain[chain['type'] == 'put'].drop_duplicates('strike').copy()
+ctrl_exp, ctrl_type = st.columns([4, 1])
+with ctrl_exp:
+    expiry = st.radio("Expiration", expirations[:8], horizontal=True,
+                      label_visibility="collapsed")
+with ctrl_type:
+    opt_label = st.radio("Type", ["Calls", "Puts"], horizontal=True,
+                         label_visibility="collapsed")
 
-# ITM / OTM filter
-if not show_itm:
-    calls = calls[calls['strike'] >= spot]
-    puts  = puts[puts['strike'] <= spot]
-if not show_otm:
-    calls = calls[calls['strike'] <= spot]
-    puts  = puts[puts['strike'] >= spot]
+opt_type = "call" if opt_label == "Calls" else "put"
 
-if min_oi > 0 and 'open_interest' in calls.columns:
-    calls = calls[calls['open_interest'] >= min_oi]
-    puts  = puts[puts['open_interest'] >= min_oi]
+# ── Load + filter chain ────────────────────────────────────────────────────────
+with st.spinner(""):
+    chain, spot = load_chain(selected, expiry)
 
-# Limit to N strikes around ATM
-all_strikes = sorted(set(calls['strike'].tolist() + puts['strike'].tolist()))
-if not all_strikes:
-    st.warning("No contracts match the current filters.")
+if chain.empty:
+    st.warning(f"No options data for {selected} — {expiry}.")
     st.stop()
 
-atm_idx  = min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - spot))
-half     = num_strikes // 2
-shown    = all_strikes[max(0, atm_idx - half): atm_idx + half + 1]
+side = chain[chain['type'] == opt_type].drop_duplicates('strike').copy()
+
+if min_oi > 0 and 'open_interest' in side.columns:
+    side = side[side['open_interest'] >= min_oi]
+
+all_strikes = sorted(side['strike'].unique())
+if not all_strikes:
+    st.warning("No contracts match current filters.")
+    st.stop()
+
+atm_idx    = min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - spot))
+half       = num_strikes // 2
+shown      = all_strikes[max(0, atm_idx - half): atm_idx + half + 1]
 atm_strike = min(shown, key=lambda s: abs(s - spot))
 
-calls = calls[calls['strike'].isin(shown)]
-puts  = puts[puts['strike'].isin(shown)]
+side = side[side['strike'].isin(shown)].copy()
 
-c_idx = calls.set_index('strike')
-p_idx = puts.set_index('strike')
+# Derived columns
+side['mark']       = ((side['bid'] + side['ask']) / 2).round(2)
+side['break_even'] = (
+    (side['strike'] + side['mark']) if opt_type == 'call'
+    else (side['strike'] - side['mark'])
+).round(2)
+side['itm'] = side['strike'] < spot if opt_type == 'call' else side['strike'] > spot
 
+# Sort: calls ascending (OTM → ITM top to bottom), puts descending
+ascending = (opt_type == 'call')
+side = side.sort_values('strike', ascending=ascending).reset_index(drop=True)
 
-def _get(df, strike, col):
-    if df.empty or strike not in df.index or col not in df.columns:
-        return None
-    v = df.loc[strike, col]
-    return None if pd.isna(v) else v
+# ── Options chain table ────────────────────────────────────────────────────────
+COLS = {
+    'strike':        'Strike',
+    'mark':          'Mark',
+    'bid':           'Bid',
+    'ask':           'Ask',
+    'break_even':    'Break Even',
+    'delta':         'Delta',
+    'iv':            'IV',
+    'volume':        'Volume',
+    'open_interest': 'OI',
+}
+COLS = {k: v for k, v in COLS.items() if k in side.columns}
 
+disp = side[list(COLS.keys())].copy()
+disp.columns = list(COLS.values())
 
-# Calls on left (wide to narrow), strike center, puts on right (narrow to wide)
-CALL_COLS = [
-    ('bid',          'C Bid'),
-    ('ask',          'C Ask'),
-    ('last',         'C Last'),
-    ('volume',       'C Vol'),
-    ('open_interest','C OI'),
-    ('iv',           'C IV'),
-    ('delta',        'C Δ'),
-    ('gamma',        'C Γ'),
-    ('theta',        'C Θ'),
-    ('vega',         'C V'),
-]
-PUT_COLS = [
-    ('delta',        'P Δ'),
-    ('gamma',        'P Γ'),
-    ('theta',        'P Θ'),
-    ('vega',         'P V'),
-    ('iv',           'P IV'),
-    ('open_interest','P OI'),
-    ('volume',       'P Vol'),
-    ('last',         'P Last'),
-    ('bid',          'P Bid'),
-    ('ask',          'P Ask'),
-]
+FMT = {
+    'Strike':    '${:.2f}',
+    'Mark':      '${:.2f}',
+    'Bid':       '${:.2f}',
+    'Ask':       '${:.2f}',
+    'Break Even':'${:.2f}',
+    'Delta':     '{:.3f}',
+    'IV':        '{:.1%}',
+    'Volume':    '{:,.0f}',
+    'OI':        '{:,.0f}',
+}
+FMT = {k: v for k, v in FMT.items() if k in disp.columns}
 
-rows = []
-for strike in sorted(shown, reverse=True):
-    row = {}
-    for col, label in CALL_COLS:
-        row[label] = _get(c_idx, strike, col)
-    row['Strike'] = strike
-    for col, label in PUT_COLS:
-        row[label] = _get(p_idx, strike, col)
-    rows.append(row)
-
-tbl = pd.DataFrame(rows)
-call_labels = [lbl for _, lbl in CALL_COLS if lbl in tbl.columns]
-put_labels  = [lbl for _, lbl in PUT_COLS  if lbl in tbl.columns]
+ITM_BG  = 'background-color: #0a1a0a' if opt_type == 'call' else 'background-color: #1a0a0a'
+ATM_STY = f'background-color: #0d1f3c; font-weight: bold; border-left: 3px solid {RH_GREEN}'
 
 
-def _style_chain(df):
+def _style(df):
     s = pd.DataFrame('', index=df.index, columns=df.columns)
-    for i, row in df.iterrows():
-        strike = row['Strike']
-        if strike == atm_strike:
-            s.loc[i, :] = 'background-color: #1a3a5c; font-weight: bold'
-        else:
-            if strike < spot:           # ITM calls
-                for c in call_labels:
-                    s.loc[i, c] = 'background-color: #0d2a0d'
-            if strike > spot:           # ITM puts
-                for c in put_labels:
-                    s.loc[i, c] = 'background-color: #2a0d0d'
+    for i in df.index:
+        strike = float(df.loc[i, 'Strike'])
+        if abs(strike - atm_strike) < 0.01:
+            s.loc[i, :] = ATM_STY
+        elif side.loc[i, 'itm']:
+            s.loc[i, :] = ITM_BG
     return s
 
 
-CHAIN_FMT = {
-    'Strike':  '${:.2f}',
-    'C Bid':   '${:.2f}', 'C Ask':  '${:.2f}', 'C Last': '${:.2f}',
-    'C Vol':   '{:,.0f}', 'C OI':   '{:,.0f}',
-    'C IV':    '{:.1%}',  'C Δ':    '{:.3f}',
-    'C Γ':     '{:.4f}',  'C Θ':    '{:.4f}',  'C V':    '{:.4f}',
-    'P Δ':     '{:.3f}',  'P Γ':    '{:.4f}',
-    'P Θ':     '{:.4f}',  'P V':    '{:.4f}',
-    'P IV':    '{:.1%}',  'P OI':   '{:,.0f}', 'P Vol':  '{:,.0f}',
-    'P Last':  '${:.2f}', 'P Bid':  '${:.2f}', 'P Ask':  '${:.2f}',
-}
-CHAIN_FMT = {k: v for k, v in CHAIN_FMT.items() if k in tbl.columns}
-
-st.caption("ITM calls shaded green · ATM row blue · ITM puts shaded red")
 st.dataframe(
-    tbl.style.apply(_style_chain, axis=None).format(CHAIN_FMT, na_rep='—'),
+    disp.style.apply(_style, axis=None).format(FMT, na_rep='—'),
     use_container_width=True,
-    height=520,
+    height=480,
     hide_index=True,
 )
 
 # ── Contract detail ────────────────────────────────────────────────────────────
 st.divider()
-st.subheader("Contract Detail")
 
-atm_default_idx = lambda strikes: (
-    min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot))
-    if strikes else 0
+sel_strike = st.select_slider(
+    "Select a strike for details",
+    options=sorted(side['strike'].unique()),
+    value=atm_strike,
+    format_func=lambda x: f"${x:.2f}",
 )
 
-call_strikes = sorted(calls['strike'].unique())
-put_strikes  = sorted(puts['strike'].unique())
-
-det_col1, det_col2 = st.columns(2)
-with det_col1:
-    call_sel = st.selectbox("Call strike", call_strikes,
-                            index=atm_default_idx(call_strikes),
-                            key="cs") if call_strikes else None
-with det_col2:
-    put_sel = st.selectbox("Put strike", put_strikes,
-                           index=atm_default_idx(put_strikes),
-                           key="ps") if put_strikes else None
-
-
-def _contract_detail(df, strike, label, color):
-    if strike is None:
-        return
-    subset = df[df['strike'] == strike]
-    if subset.empty:
-        st.info(f"No data for {label} ${strike:.2f}")
-        return
-    r = subset.iloc[0]
-
-    bid  = float(r.get('bid')  or 0)
-    ask  = float(r.get('ask')  or 0)
-    last = float(r.get('last') or 0)
-    mid  = (bid + ask) / 2
-    spread     = ask - bid
-    spread_pct = (spread / mid * 100) if mid > 0 else 0.0
-
-    st.markdown(f"**{color} {label} — Strike ${strike:.2f}** · exp {r.get('expiry', expiry)}")
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Bid",  f"${bid:.2f}")
-    c2.metric("Ask",  f"${ask:.2f}")
-    c3.metric("Last", f"${last:.2f}" if last else "—")
-    c4.metric("Mid",  f"${mid:.2f}")
-
-    c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Spread", f"${spread:.2f} ({spread_pct:.1f}%)")
-    iv_v = r.get('iv') or 0
-    c6.metric("IV", f"{float(iv_v)*100:.1f}%" if iv_v else "—")
-    vol = r.get('volume')
-    c7.metric("Volume", f"{int(vol):,}" if vol and not pd.isna(vol) else "—")
-    oi = r.get('open_interest')
-    c8.metric("Open Interest", f"{int(oi):,}" if oi and not pd.isna(oi) else "—")
-
+hit = side[side['strike'] == sel_strike]
+if not hit.empty:
+    r       = hit.iloc[0]
+    bid     = float(r.get('bid')  or 0)
+    ask     = float(r.get('ask')  or 0)
+    mark    = float(r.get('mark') or (bid + ask) / 2)
+    be      = float(r.get('break_even') or 0)
+    spread  = ask - bid
+    sp_pct  = (spread / mark * 100) if mark else 0.0
+    iv_v    = r.get('iv')
     delta_v = r.get('delta')
     gamma_v = r.get('gamma')
     theta_v = r.get('theta')
     vega_v  = r.get('vega')
+    vol     = r.get('volume')
+    oi      = r.get('open_interest')
 
-    def _fmt(v, spec=',.4f', prefix=''):
-        if v is None or pd.isna(v):
-            return "—"
-        return f"{prefix}{float(v):{spec}}"
+    itm_tag  = "ITM" if r['itm'] else "OTM"
+    lbl      = "Call" if opt_type == 'call' else "Put"
+    dot_color = RH_GREEN if opt_type == 'call' else RH_RED
 
-    c9, c10, c11, c12 = st.columns(4)
-    c9.metric( "Delta (Δ)",      _fmt(delta_v))
-    c10.metric("Gamma (Γ)",      _fmt(gamma_v))
-    c11.metric("Theta (Θ) /day", _fmt(theta_v, prefix='$'))
-    c12.metric("Vega (V)",       _fmt(vega_v))
-
-
-with det_col1:
-    _contract_detail(calls, call_sel, "CALL", "🟢")
-with det_col2:
-    _contract_detail(puts,  put_sel,  "PUT",  "🔴")
-
-# ── Volatility smile ───────────────────────────────────────────────────────────
-st.divider()
-smile_calls = calls[calls['iv'] > 0].sort_values('strike') if not calls.empty else pd.DataFrame()
-smile_puts  = puts[puts['iv']  > 0].sort_values('strike') if not puts.empty  else pd.DataFrame()
-
-if not smile_calls.empty or not smile_puts.empty:
-    st.subheader("Volatility Smile")
-    fig = go.Figure()
-    if not smile_calls.empty:
-        fig.add_trace(go.Scatter(
-            x=smile_calls['strike'], y=smile_calls['iv'],
-            mode='lines+markers', name='Calls',
-            line=dict(color='#2ecc71', width=2), marker=dict(size=6),
-        ))
-    if not smile_puts.empty:
-        fig.add_trace(go.Scatter(
-            x=smile_puts['strike'], y=smile_puts['iv'],
-            mode='lines+markers', name='Puts',
-            line=dict(color='#e74c3c', width=2), marker=dict(size=6),
-        ))
-    fig.add_vline(x=spot, line_dash='dash', line_color='orange',
-                  annotation_text=f"Spot ${spot:.2f}")
-    fig.update_layout(
-        title=f'{selected} Volatility Smile — {expiry}',
-        xaxis_title='Strike', yaxis_title='Implied Volatility',
-        yaxis_tickformat='.0%', height=360,
-        margin=dict(l=0, r=0, t=40, b=0),
+    st.markdown(
+        f"<span style='color:{dot_color};font-weight:bold'>{lbl} ${sel_strike:.2f}</span>"
+        f" &nbsp;·&nbsp; {expiry} &nbsp;·&nbsp; <span style='color:gray'>{itm_tag}</span>",
+        unsafe_allow_html=True,
     )
-    st.plotly_chart(fig, use_container_width=True)
+
+    def _f(v, spec='.4f', prefix=''):
+        return f"{prefix}{float(v):{spec}}" if v is not None and not pd.isna(v) else "—"
+
+    # Row 1 — price detail
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Mark",       f"${mark:.2f}")
+    c2.metric("Bid",        f"${bid:.2f}")
+    c3.metric("Ask",        f"${ask:.2f}")
+    c4.metric("Spread",     f"${spread:.2f} ({sp_pct:.1f}%)")
+    c5.metric("Break Even", f"${be:.2f}")
+
+    # Row 2 — greeks + market data
+    c6, c7, c8, c9, c10 = st.columns(5)
+    c6.metric("IV",            f"{float(iv_v)*100:.1f}%" if iv_v else "—")
+    c7.metric("Delta (Δ)",     _f(delta_v))
+    c8.metric("Gamma (Γ)",     _f(gamma_v))
+    c9.metric("Theta (Θ)/day", _f(theta_v, prefix='$'))
+    c10.metric("Vega (V)",     _f(vega_v))
+
+    c11, c12 = st.columns(2)
+    c11.metric("Volume",        f"{int(vol):,}" if vol and not pd.isna(vol) else "—")
+    c12.metric("Open Interest", f"{int(oi):,}"  if oi  and not pd.isna(oi)  else "—")
+
+# ── Watchlist comparison (collapsed) ──────────────────────────────────────────
+with st.expander("Watchlist — IV Rank", expanded=False):
+    summary = load_watchlist_summary()
+    fig_iv = px.bar(
+        summary.sort_values('IV Rank'), x='IV Rank', y='Ticker',
+        orientation='h', color='IV Rank',
+        color_continuous_scale='RdYlGn_r', range_color=[0, 100],
+    )
+    fig_iv.add_vline(x=50, line_dash='dash', line_color='white', opacity=0.4)
+    fig_iv.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0),
+                         coloraxis_showscale=False)
+    st.plotly_chart(fig_iv, use_container_width=True)
+    st.dataframe(summary.style.format({'Spot': '${:.2f}', 'IV Rank': '{:.1f}'}),
+                 use_container_width=True, hide_index=True)
 
 st.caption(
-    "IV Rank from 52-week realized vol. Greeks via vollib (Black-Scholes) when not sourced from exchange."
+    "IV Rank from 52-week realized vol · Greeks via vollib (Black-Scholes) when not from exchange"
 )
