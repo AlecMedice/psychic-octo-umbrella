@@ -150,6 +150,19 @@ def get_spot_price(ticker: str) -> float:
         return 0.0
 
 
+def get_previous_close(ticker: str) -> float:
+    """Prior trading session's closing price — used to anchor chart scale."""
+    try:
+        h = yf.Ticker(ticker).history(period='5d', interval='1d')
+        if len(h) >= 2:
+            return float(h['Close'].iloc[-2])
+        if len(h) == 1:
+            return float(h['Close'].iloc[-1])
+        return 0.0
+    except Exception:
+        return 0.0
+
+
 def get_expirations(ticker: str) -> list:
     try:
         return list(yf.Ticker(ticker).options)

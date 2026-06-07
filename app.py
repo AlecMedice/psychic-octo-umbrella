@@ -6,7 +6,7 @@ import plotly.express as px
 from fetcher import (
     WATCHLIST, CHART_PERIODS,
     get_options_chain, get_spot_price, get_iv_rank,
-    get_expirations, get_price_history, get_news,
+    get_expirations, get_price_history, get_previous_close, get_news,
     get_fear_greed, get_vix_term_structure, get_earnings_date, get_short_interest,
     alpaca_configured, tradier_configured,
 )
@@ -35,6 +35,10 @@ st.markdown("""
 @st.cache_data(ttl=60,  show_spinner=False)
 def load_chart(ticker, period):
     return get_price_history(ticker, period)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_previous_close(ticker):
+    return get_previous_close(ticker)
 
 @st.cache_data(ttl=60,  show_spinner=False)
 def load_chain(ticker, exp):
@@ -175,6 +179,18 @@ with h3:
 # ── Price chart ────────────────────────────────────────────────────────────────
 if not hist.empty:
     short_period = period_label in ('1D', '3D', '1W')
+    prev_close   = load_previous_close(selected)
+
+    # Anchor the y-axis around the actual trading range + previous close —
+    # never let it auto-scale down to $0 (which buries the price action).
+    lo = float(hist['Low'].min())
+    hi = float(hist['High'].max())
+    if prev_close:
+        lo = min(lo, prev_close)
+        hi = max(hi, prev_close)
+    pad = (hi - lo) * 0.08 or hi * 0.01
+    y_range = [lo - pad, hi + pad]
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=hist.index, y=hist['Close'],
@@ -184,11 +200,12 @@ if not hist.empty:
         fillcolor=f"{'rgba(0,200,5,0.07)' if is_up else 'rgba(255,80,0,0.07)'}",
         hovertemplate='%{x|%b %d %H:%M}<br>$%{y:.2f}<extra></extra>',
     ))
-    # Reference line: opening price for short periods, first close for longer ones
-    ref = open_px if short_period else float(hist['Close'].iloc[0])
+    # Reference line: previous close for short periods, first close for longer ones
+    ref = prev_close if (short_period and prev_close) else float(hist['Close'].iloc[0])
+    ref_label = 'Prev Close' if (short_period and prev_close) else 'Start'
     fig.add_hline(
         y=ref, line_dash='dot', line_color='#555',
-        annotation_text=f"{'Open' if short_period else 'Start'} ${ref:.2f}",
+        annotation_text=f"{ref_label} ${ref:.2f}",
         annotation_position="right",
         annotation_font_color='#666',
     )
@@ -203,7 +220,7 @@ if not hist.empty:
         yaxis=dict(
             showgrid=True, gridcolor='#1a1a1a', zeroline=False,
             tickprefix='$', tickfont=dict(color='#888', size=10),
-            side='right',
+            side='right', range=y_range,
         ),
         plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
         showlegend=False,
