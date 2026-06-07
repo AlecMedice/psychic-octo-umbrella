@@ -95,6 +95,17 @@ def alpaca_configured() -> bool:
     return bool(_ALPACA_KEY and _ALPACA_SECRET)
 
 
+_TRADIER_TOKEN = os.getenv('TRADIER_TOKEN', '')
+_TRADIER_BASE  = (
+    'https://sandbox.tradier.com/v1' if os.getenv('TRADIER_SANDBOX', 'true').lower() == 'true'
+    else 'https://api.tradier.com/v1'
+)
+
+
+def tradier_configured() -> bool:
+    return bool(_TRADIER_TOKEN)
+
+
 def parse_occ_symbol(symbol: str) -> dict:
     """Parse OCC option symbol: {TICKER}{YYMMDD}{C/P}{8-digit-strike}"""
     m = re.match(r'([A-Z1-9]+)(\d{6})([CP])(\d{8})', symbol)
@@ -167,6 +178,59 @@ def _chain_from_alpaca(ticker: str, expiry: str | None) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _chain_from_tradier(ticker: str, expiry: str | None) -> pd.DataFrame:
+    headers = {
+        'Authorization': f'Bearer {_TRADIER_TOKEN}',
+        'Accept': 'application/json',
+    }
+
+    if not expiry:
+        resp = requests.get(
+            f'{_TRADIER_BASE}/markets/options/expirations',
+            headers=headers, params={'symbol': ticker}, timeout=10,
+        )
+        resp.raise_for_status()
+        dates = (resp.json().get('expirations') or {}).get('date') or []
+        if isinstance(dates, str):
+            dates = [dates]
+        if not dates:
+            return pd.DataFrame()
+        expiry = dates[0]
+
+    resp = requests.get(
+        f'{_TRADIER_BASE}/markets/options/chains',
+        headers=headers, params={'symbol': ticker, 'expiration': expiry, 'greeks': 'true'},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    options = (resp.json().get('options') or {}).get('option') or []
+    if isinstance(options, dict):
+        options = [options]
+
+    rows = []
+    for o in options:
+        greeks = o.get('greeks') or {}
+        rows.append({
+            'symbol':        o.get('symbol', ''),
+            'ticker':        ticker,
+            'expiry':        o.get('expiration_date', expiry),
+            'strike':        float(o.get('strike') or 0),
+            'type':          o.get('option_type', ''),
+            'bid':           o.get('bid') or 0.0,
+            'ask':           o.get('ask') or 0.0,
+            'last':          o.get('last') or 0.0,
+            'volume':        o.get('volume') or 0,
+            'open_interest': o.get('open_interest') or 0,
+            'iv':            greeks.get('mid_iv') or greeks.get('smv_vol') or 0.0,
+            'delta':         greeks.get('delta') or 0.0,
+            'gamma':         greeks.get('gamma') or 0.0,
+            'theta':         greeks.get('theta') or 0.0,
+            'vega':          greeks.get('vega') or 0.0,
+        })
+
+    return pd.DataFrame(rows)
+
+
 def _chain_from_yfinance(ticker: str, expiry: str | None = None) -> pd.DataFrame:
     try:
         tk = yf.Ticker(ticker)
@@ -203,6 +267,13 @@ def get_options_chain(ticker: str, expiry: str | None = None) -> pd.DataFrame:
     if alpaca_configured():
         try:
             df = _chain_from_alpaca(ticker, expiry)
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+    if tradier_configured():
+        try:
+            df = _chain_from_tradier(ticker, expiry)
             if not df.empty:
                 return df
         except Exception:

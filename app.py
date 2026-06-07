@@ -8,7 +8,7 @@ from fetcher import (
     get_options_chain, get_spot_price, get_iv_rank,
     get_expirations, get_price_history, get_news,
     get_fear_greed, get_vix_term_structure, get_earnings_date, get_short_interest,
-    alpaca_configured,
+    alpaca_configured, tradier_configured,
 )
 from greeks_calc import enrich_with_greeks, VOLLIB_OK
 from agent import agent_configured, stream_response
@@ -125,7 +125,16 @@ with st.sidebar:
         st.caption("No recent news found.")
 
     st.divider()
-    st.caption("Alpaca + yfinance" if alpaca_configured() else "yfinance (add Alpaca keys for exchange Greeks)")
+    _sources = []
+    if alpaca_configured():
+        _sources.append("Alpaca")
+    if tradier_configured():
+        _sources.append("Tradier")
+    _sources.append("yfinance")
+    if len(_sources) == 1:
+        st.caption("yfinance only — add Alpaca or Tradier keys for exchange Greeks")
+    else:
+        st.caption(" → ".join(_sources) + " (fallback order)")
 
 
 # ── Load stock data ────────────────────────────────────────────────────────────
