@@ -6,10 +6,16 @@ import plotly.express as px
 from fetcher import (
     WATCHLIST, CHART_PERIODS,
     get_options_chain, get_spot_price, get_iv_rank,
-    get_expirations, get_price_history, get_news,
-    alpaca_configured,
+    get_expirations, get_price_history, get_previous_close, get_news,
+    get_fear_greed, get_vix_term_structure, get_earnings_date, get_short_interest,
+    alpaca_configured, tradier_configured,
 )
 from greeks_calc import enrich_with_greeks, VOLLIB_OK
+from agent import agent_configured, stream_response
+from signals import (
+    implied_move, put_call_ratios, iv_skew, unusual_volume,
+    iv_vs_rv, relative_volume, momentum, opportunity_score,
+)
 
 st.set_page_config(page_title="Options Evaluator", page_icon="📈", layout="wide")
 
@@ -30,6 +36,10 @@ st.markdown("""
 def load_chart(ticker, period):
     return get_price_history(ticker, period)
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_previous_close(ticker):
+    return get_previous_close(ticker)
+
 @st.cache_data(ttl=60,  show_spinner=False)
 def load_chain(ticker, exp):
     spot = get_spot_price(ticker)
@@ -49,6 +59,22 @@ def load_summary():
 def load_news(ticker):
     return get_news(ticker)
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_fear_greed():
+    return get_fear_greed()
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_vix():
+    return get_vix_term_structure()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_earnings(ticker):
+    return get_earnings_date(ticker)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_short_interest(ticker):
+    return get_short_interest(ticker)
+
 
 # ── Sidebar: ticker + news ─────────────────────────────────────────────────────
 with st.sidebar:
@@ -61,16 +87,41 @@ with st.sidebar:
     st.divider()
     st.markdown("#### 📰 Latest News")
 
+    SOURCE_COLORS = {
+        'Yahoo Finance':  '#6001D2',
+        'Google News':    '#4285F4',
+        'Alpha Vantage':  '#00875A',
+        'Finnhub':        '#FF6B35',
+        'Reddit':         '#FF4500',
+        'Reddit Buzz':    '#FF4500',
+        'Marketaux':      '#0EA5E9',
+    }
+    SENTIMENT_ICONS = {
+        'Bullish': '🟢',
+        'Bearish': '🔴',
+        'Neutral': '⚪',
+    }
+
     news_items = load_news(selected)
     if news_items:
         for item in news_items:
-            meta = " · ".join(filter(None, [item['publisher'], item['when']]))
+            src    = item.get('source', '')
+            badge_color = SOURCE_COLORS.get(src, '#555')
+            badge  = f"<span style='background:{badge_color};color:#fff;font-size:0.65rem;padding:1px 5px;border-radius:3px;margin-right:4px'>{src}</span>" if src else ''
+            sent   = item.get('sentiment', '')
+            sent_icon = SENTIMENT_ICONS.get(sent, '')
+            pub    = item.get('publisher', '')
+            when   = item.get('when', '')
+            meta_parts = list(filter(None, [pub, when]))
+            meta   = ' · '.join(meta_parts)
             st.markdown(
                 f"<div class='news-card'>"
-                f"<div class='news-title'><a href='{item['url']}' target='_blank'>"
-                f"{item['title']}</a></div>"
-                f"<div class='news-meta'>{meta}</div>"
-                + (f"<div class='news-meta'>{item['summary']}</div>" if item['summary'] else "")
+                f"<div class='news-title'>"
+                f"<a href='{item['url']}' target='_blank'>{item['title']}</a>"
+                f" {sent_icon}</div>"
+                f"<div class='news-meta'>{badge}{meta}</div>"
+                + (f"<div class='news-meta' style='margin-top:3px'>{item['summary']}</div>"
+                   if item.get('summary') else "")
                 + "</div>",
                 unsafe_allow_html=True,
             )
@@ -78,7 +129,16 @@ with st.sidebar:
         st.caption("No recent news found.")
 
     st.divider()
-    st.caption("Alpaca + yfinance" if alpaca_configured() else "yfinance (add Alpaca keys for exchange Greeks)")
+    _sources = []
+    if alpaca_configured():
+        _sources.append("Alpaca")
+    if tradier_configured():
+        _sources.append("Tradier")
+    _sources.append("yfinance")
+    if len(_sources) == 1:
+        st.caption("yfinance only — add Alpaca or Tradier keys for exchange Greeks")
+    else:
+        st.caption(" → ".join(_sources) + " (fallback order)")
 
 
 # ── Load stock data ────────────────────────────────────────────────────────────
@@ -119,6 +179,18 @@ with h3:
 # ── Price chart ────────────────────────────────────────────────────────────────
 if not hist.empty:
     short_period = period_label in ('1D', '3D', '1W')
+    prev_close   = load_previous_close(selected)
+
+    # Anchor the y-axis around the actual trading range + previous close —
+    # never let it auto-scale down to $0 (which buries the price action).
+    lo = float(hist['Low'].min())
+    hi = float(hist['High'].max())
+    if prev_close:
+        lo = min(lo, prev_close)
+        hi = max(hi, prev_close)
+    pad = (hi - lo) * 0.08 or hi * 0.01
+    y_range = [lo - pad, hi + pad]
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=hist.index, y=hist['Close'],
@@ -128,11 +200,12 @@ if not hist.empty:
         fillcolor=f"{'rgba(0,200,5,0.07)' if is_up else 'rgba(255,80,0,0.07)'}",
         hovertemplate='%{x|%b %d %H:%M}<br>$%{y:.2f}<extra></extra>',
     ))
-    # Reference line: opening price for short periods, first close for longer ones
-    ref = open_px if short_period else float(hist['Close'].iloc[0])
+    # Reference line: previous close for short periods, first close for longer ones
+    ref = prev_close if (short_period and prev_close) else float(hist['Close'].iloc[0])
+    ref_label = 'Prev Close' if (short_period and prev_close) else 'Start'
     fig.add_hline(
         y=ref, line_dash='dot', line_color='#555',
-        annotation_text=f"{'Open' if short_period else 'Start'} ${ref:.2f}",
+        annotation_text=f"{ref_label} ${ref:.2f}",
         annotation_position="right",
         annotation_font_color='#666',
     )
@@ -147,7 +220,7 @@ if not hist.empty:
         yaxis=dict(
             showgrid=True, gridcolor='#1a1a1a', zeroline=False,
             tickprefix='$', tickfont=dict(color='#888', size=10),
-            side='right',
+            side='right', range=y_range,
         ),
         plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
         showlegend=False,
@@ -309,3 +382,190 @@ with st.expander("Watchlist — IV Rank", expanded=False):
 st.caption(
     "IV Rank from 52-week realized vol · Greeks via vollib (Black-Scholes) when not from exchange"
 )
+
+# ── Signals sidebar ────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.divider()
+    st.markdown("#### 📊 Trade Signals")
+
+    _fg   = load_fear_greed()
+    _vix  = load_vix()
+    _earn = load_earnings(selected)
+    _si   = load_short_interest(selected)
+    _mom  = momentum(hist)
+    _rv_sig = iv_vs_rv(chain, hist)
+    _pc   = put_call_ratios(chain)
+    _im   = implied_move(chain, spot)
+    _skew = iv_skew(chain, spot)
+    _rvol = relative_volume(hist)
+    _unusual = unusual_volume(chain)
+    _score = opportunity_score(
+        iv_rank, _rv_sig, _pc, _mom, _fg.get('score')
+    )
+
+    # ── Opportunity score ──
+    s = _score['score']
+    direction = _score['direction']
+    dir_color = '#00C805' if direction == 'sell' else ('#0EA5E9' if direction == 'buy' else '#888')
+    dir_label = {'sell': 'Sell Premium', 'buy': 'Buy Premium', 'neutral': 'No Clear Edge'}[direction]
+    bar_pct   = int(s / 10 * 100)
+    st.markdown(
+        f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:6px'>"
+        f"<div style='flex:1;background:#1a1a1a;border-radius:4px;height:8px'>"
+        f"<div style='width:{bar_pct}%;background:{dir_color};border-radius:4px;height:8px'></div></div>"
+        f"<span style='font-size:0.85rem;font-weight:700;color:{dir_color}'>{s:.1f}/10</span>"
+        f"</div>"
+        f"<div style='font-size:0.78rem;color:{dir_color};margin-bottom:2px'><b>{dir_label}</b></div>",
+        unsafe_allow_html=True,
+    )
+    for note in _score['notes']:
+        st.markdown(
+            f"<div style='font-size:0.72rem;color:#888;padding-left:6px'>· {note}</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # ── Key metrics grid ──
+    def _sig_row(label, value, color='#ccc', sub=''):
+        sub_html = f"<span style='color:#555;font-size:0.68rem'> {sub}</span>" if sub else ''
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;font-size:0.78rem;"
+            f"margin-bottom:3px'>"
+            f"<span style='color:#888'>{label}</span>"
+            f"<span style='color:{color};font-weight:600'>{value}{sub_html}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+    if _im is not None:
+        _sig_row("Implied Move", f"±{_im:.1f}%", '#ccc', f"by {expiry}")
+
+    if _pc.get('vol') is not None:
+        pc_v = _pc['vol']
+        pc_color = '#FF5000' if pc_v > 1.3 else ('#00C805' if pc_v < 0.7 else '#888')
+        _sig_row("P/C Ratio (vol)", f"{pc_v:.2f}", pc_color)
+
+    if _rv_sig.get('premium') is not None:
+        prem = _rv_sig['premium']
+        p_color = '#FF5000' if prem > 4 else ('#00C805' if prem < -2 else '#888')
+        _sig_row("IV vs RV (30d)", f"{prem:+.1f}%", p_color,
+                 f"IV {_rv_sig['avg_iv']}% / RV {_rv_sig['rv30']}%")
+
+    if _skew is not None:
+        sk_color = '#FF5000' if _skew > 3 else ('#00C805' if _skew < -1 else '#888')
+        _sig_row("25Δ Skew", f"{_skew:+.1f}%", sk_color,
+                 "put rich" if _skew > 0 else "call rich")
+
+    if _rvol is not None:
+        rv_color = '#FF9500' if _rvol > 1.5 else '#888'
+        _sig_row("Rel Volume", f"{_rvol:.1f}×", rv_color)
+
+    if _mom.get('rsi') is not None:
+        rsi = _mom['rsi']
+        rsi_color = '#FF5000' if rsi > 70 else ('#00C805' if rsi < 35 else '#888')
+        _sig_row("RSI-14", f"{rsi:.0f}", rsi_color)
+
+    if _fg.get('score') is not None:
+        fg_s = _fg['score']
+        fg_color = '#00C805' if fg_s < 30 else ('#FF5000' if fg_s > 70 else '#888')
+        _sig_row("Fear & Greed", f"{fg_s:.0f} — {_fg['rating']}", fg_color)
+
+    # VIX term structure
+    vix_vals = {k: v for k, v in _vix.items() if v is not None}
+    if vix_vals:
+        vix_str = '  '.join(f"{k} {v}" for k, v in vix_vals.items())
+        st.markdown(
+            f"<div style='font-size:0.72rem;color:#555;margin-top:4px'>VIX term: "
+            f"<span style='color:#888'>{vix_str}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+    if _earn:
+        days_to = (pd.Timestamp(_earn) - pd.Timestamp.now()).days
+        earn_color = '#FF9500' if days_to <= 14 else '#555'
+        _sig_row("Next Earnings", _earn, earn_color,
+                 f"{days_to}d" if days_to >= 0 else "passed")
+
+    if _si.get('short_interest'):
+        _sig_row("Short Interest",
+                 f"{_si['short_interest']:,}", '#888',
+                 f"{_si['days_to_cover']:.1f}d cover")
+
+    # ── Unusual activity ──
+    if _unusual:
+        st.markdown(
+            "<div style='font-size:0.75rem;color:#FF9500;margin-top:8px;margin-bottom:4px'>"
+            "⚡ Unusual Activity</div>",
+            unsafe_allow_html=True,
+        )
+        for u in _unusual[:4]:
+            arrow = '▲' if u['type'] == 'call' else '▼'
+            u_color = '#00C805' if u['type'] == 'call' else '#FF5000'
+            iv_str = f"  IV {u['iv']}%" if u['iv'] else ''
+            st.markdown(
+                f"<div style='font-size:0.72rem;color:{u_color};padding-left:4px'>"
+                f"{arrow} {u['type'].upper()} ${u['strike']:.0f} — "
+                f"vol {u['volume']:,} ({u['vol_oi_ratio']:.1f}× OI){iv_str}</div>",
+                unsafe_allow_html=True,
+            )
+
+# ── AI Agent sidebar ───────────────────────────────────────────────────────────
+with st.sidebar:
+    st.divider()
+    st.markdown("#### 🤖 Ask the Agent")
+
+    if not agent_configured():
+        st.caption("Add `GEMINI_API_KEY` to `.env` to enable the AI assistant.")
+    else:
+        if 'agent_messages' not in st.session_state:
+            st.session_state.agent_messages = []
+
+        # Build context from computed variables
+        atm_row = side[side['strike'] == atm_strike]
+        _r = atm_row.iloc[0] if not atm_row.empty else None
+        agent_ctx = {
+            'ticker':        selected,
+            'spot':          spot,
+            'iv_rank':       iv_rank,
+            'expiry':        expiry,
+            'atm_strike':    atm_strike,
+            'opt_type':      opt_type,
+            'mark':          float(_r['mark']) if _r is not None else 0.0,
+            'iv':            _r.get('iv')    if _r is not None else None,
+            'delta':         _r.get('delta') if _r is not None else None,
+            'theta':         _r.get('theta') if _r is not None else None,
+            'news_headlines': [n['title'] for n in news_items[:5]],
+        }
+
+        # Display recent conversation (last 6 messages)
+        for msg in st.session_state.agent_messages[-6:]:
+            role_label = "**You:** " if msg['role'] == 'user' else "**Agent:** "
+            st.markdown(
+                f"<div style='font-size:0.78rem;margin-bottom:4px'>{role_label}"
+                f"{msg['content']}</div>",
+                unsafe_allow_html=True,
+            )
+
+        with st.form("agent_form", clear_on_submit=True):
+            user_input = st.text_input(
+                "Ask about this ticker or its options…",
+                label_visibility="collapsed",
+                placeholder="e.g. Is IV rank high? What does delta mean here?",
+            )
+            submitted = st.form_submit_button("Send", use_container_width=True)
+
+        if submitted and user_input.strip():
+            st.session_state.agent_messages.append(
+                {'role': 'user', 'content': user_input.strip()}
+            )
+            with st.spinner(""):
+                reply = ''.join(stream_response(st.session_state.agent_messages, agent_ctx))
+            st.session_state.agent_messages.append(
+                {'role': 'assistant', 'content': reply}
+            )
+            st.rerun()
+
+        if st.session_state.get('agent_messages'):
+            if st.button("Clear chat", use_container_width=True):
+                st.session_state.agent_messages = []
+                st.rerun()
