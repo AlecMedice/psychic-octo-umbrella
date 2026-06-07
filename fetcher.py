@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import calendar
 import requests
 import pandas as pd
@@ -106,6 +107,27 @@ def tradier_configured() -> bool:
     return bool(_TRADIER_TOKEN)
 
 
+def _tradier_throttle(resp) -> None:
+    """Pause briefly if Tradier's rolling-minute quota is nearly exhausted."""
+    try:
+        available = int(resp.headers.get('X-Ratelimit-Available', 999))
+        if available <= 2:
+            time.sleep(1.5)
+    except (TypeError, ValueError):
+        pass
+
+
+def _tradier_get(path: str, params: dict):
+    resp = requests.get(
+        f'{_TRADIER_BASE}{path}',
+        headers={'Authorization': f'Bearer {_TRADIER_TOKEN}', 'Accept': 'application/json'},
+        params=params, timeout=10,
+    )
+    resp.raise_for_status()
+    _tradier_throttle(resp)
+    return resp
+
+
 def parse_occ_symbol(symbol: str) -> dict:
     """Parse OCC option symbol: {TICKER}{YYMMDD}{C/P}{8-digit-strike}"""
     m = re.match(r'([A-Z1-9]+)(\d{6})([CP])(\d{8})', symbol)
@@ -179,17 +201,8 @@ def _chain_from_alpaca(ticker: str, expiry: str | None) -> pd.DataFrame:
 
 
 def _chain_from_tradier(ticker: str, expiry: str | None) -> pd.DataFrame:
-    headers = {
-        'Authorization': f'Bearer {_TRADIER_TOKEN}',
-        'Accept': 'application/json',
-    }
-
     if not expiry:
-        resp = requests.get(
-            f'{_TRADIER_BASE}/markets/options/expirations',
-            headers=headers, params={'symbol': ticker}, timeout=10,
-        )
-        resp.raise_for_status()
+        resp = _tradier_get('/markets/options/expirations', {'symbol': ticker})
         dates = (resp.json().get('expirations') or {}).get('date') or []
         if isinstance(dates, str):
             dates = [dates]
@@ -197,12 +210,8 @@ def _chain_from_tradier(ticker: str, expiry: str | None) -> pd.DataFrame:
             return pd.DataFrame()
         expiry = dates[0]
 
-    resp = requests.get(
-        f'{_TRADIER_BASE}/markets/options/chains',
-        headers=headers, params={'symbol': ticker, 'expiration': expiry, 'greeks': 'true'},
-        timeout=10,
-    )
-    resp.raise_for_status()
+    resp = _tradier_get('/markets/options/chains',
+                        {'symbol': ticker, 'expiration': expiry, 'greeks': 'true'})
     options = (resp.json().get('options') or {}).get('option') or []
     if isinstance(options, dict):
         options = [options]
