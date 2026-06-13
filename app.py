@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+from datetime import datetime
 
 from fetcher import (
     WATCHLIST, CHART_PERIODS,
@@ -320,8 +321,15 @@ with tab_chart:
 with tab_chain:
     ctrl_exp, ctrl_type = st.columns([5, 1])
     with ctrl_exp:
-        expiry = st.radio("Expiration", expirations[:8], horizontal=True,
-                          label_visibility="collapsed")
+        _this_year = datetime.now().year
+        def _fmt_exp(d):
+            dt = datetime.strptime(d, "%Y-%m-%d")
+            return dt.strftime("%b %-d") if dt.year == _this_year else dt.strftime("%b %-d '%y")
+        _exp_slice = expirations[:8]
+        _exp_labels = {_fmt_exp(d): d for d in _exp_slice}
+        _selected_label = st.radio("Expiration", list(_exp_labels), horizontal=True,
+                                   label_visibility="collapsed")
+        expiry = _exp_labels[_selected_label]
     with ctrl_type:
         opt_label = st.radio("Type", ["Calls", "Puts"], horizontal=True,
                              label_visibility="collapsed")
