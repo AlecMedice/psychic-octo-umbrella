@@ -15,6 +15,11 @@ from fetcher import (
 from greeks_calc import enrich_with_greeks, VOLLIB_OK
 from agent import agent_configured, stream_response, classify_political_posts
 from alerts import start_scheduler, telegram_configured
+from trader import (
+    alpaca_configured as trader_alpaca_configured,
+    get_account, get_positions, get_orders, get_trade_log,
+    run_trading_cycle,
+)
 from signals import (
     implied_move, put_call_ratios, iv_skew, unusual_volume,
     iv_vs_rv, relative_volume, momentum, opportunity_score,
@@ -237,8 +242,8 @@ if not expirations:
 
 
 # ── Main tabs ──────────────────────────────────────────────────────────────────
-tab_chart, tab_chain, tab_signals, tab_political = st.tabs(
-    ["📈  Chart", "🎯  Options Chain", "📊  Signals", "🏛️  Political"]
+tab_chart, tab_chain, tab_signals, tab_political, tab_trader = st.tabs(
+    ["📈  Chart", "🎯  Options Chain", "📊  Signals", "🏛️  Political", "🤖  AI Trader"]
 )
 
 
@@ -782,3 +787,115 @@ with st.sidebar:
             if st.button("Clear chat", use_container_width=True):
                 st.session_state.agent_messages = []
                 st.rerun()
+
+# ──────────────────────────── TAB 5: AI TRADER ────────────────────────────────
+with tab_trader:
+    st.markdown("<div class='section-label'>AI Paper Trader</div>", unsafe_allow_html=True)
+
+    _alpaca_ok = trader_alpaca_configured()
+    _agent_ok  = agent_configured()
+
+    if not _alpaca_ok:
+        st.warning("Add ALPACA_API_KEY and ALPACA_SECRET_KEY (paper trading) to .env to enable trading.")
+    if not _agent_ok:
+        st.warning("Add GEMINI_API_KEY to .env to enable AI trade decisions.")
+
+    # ── Account summary ──────────────────────────────────────────────────────
+    if _alpaca_ok:
+        acct = get_account()
+        if acct:
+            c1, c2, c3, c4 = st.columns(4)
+            equity     = float(acct.get('equity', 0))
+            cash       = float(acct.get('cash', 0))
+            buying_pwr = float(acct.get('buying_power', 0))
+            start_val  = float(acct.get('last_equity', equity))
+            day_pl     = equity - start_val
+            day_pl_pct = day_pl / start_val * 100 if start_val else 0
+            pl_color   = '#2ecc71' if day_pl >= 0 else '#e74c3c'
+            c1.metric("Portfolio Value", f"${equity:,.2f}")
+            c2.metric("Cash", f"${cash:,.2f}")
+            c3.metric("Buying Power", f"${buying_pwr:,.2f}")
+            with c4:
+                st.markdown(
+                    f"<div style='padding-top:0.4rem'>"
+                    f"<div style='font-size:0.75rem;color:#888;text-transform:uppercase;letter-spacing:.08em'>Day P&L</div>"
+                    f"<div style='font-size:1.4rem;font-weight:700;color:{pl_color}'>"
+                    f"{'+'if day_pl>=0 else ''}{day_pl:,.2f} ({day_pl_pct:+.2f}%)</div></div>",
+                    unsafe_allow_html=True,
+                )
+
+        st.markdown("---")
+
+        # ── Manual trigger ───────────────────────────────────────────────────
+        col_btn, col_status = st.columns([1, 3])
+        with col_btn:
+            if st.button("▶ Run Trade Cycle Now", use_container_width=True,
+                         disabled=not (_alpaca_ok and _agent_ok)):
+                with st.spinner("Scanning watchlist and making decisions..."):
+                    run_trading_cycle()
+                st.success("Trade cycle complete — see log below.")
+                st.rerun()
+
+        # ── Open positions ───────────────────────────────────────────────────
+        positions = get_positions()
+        st.markdown("<div class='section-label'>Open Positions</div>", unsafe_allow_html=True)
+        if positions:
+            pos_rows = []
+            for p in positions:
+                qty    = float(p.get('qty', 0))
+                avg_px = float(p.get('avg_entry_price', 0))
+                cur_px = float(p.get('current_price') or avg_px)
+                pl     = float(p.get('unrealized_pl', 0))
+                pl_pct = float(p.get('unrealized_plpc', 0)) * 100
+                pos_rows.append({
+                    'Symbol':    p.get('symbol', ''),
+                    'Qty':       qty,
+                    'Avg Entry': f"${avg_px:.2f}",
+                    'Current':   f"${cur_px:.2f}",
+                    'P&L':       f"{'+'if pl>=0 else ''}{pl:.2f}",
+                    'P&L %':     f"{'+'if pl_pct>=0 else ''}{pl_pct:.1f}%",
+                    'Side':      p.get('side', '').upper(),
+                })
+            pos_df = pd.DataFrame(pos_rows)
+
+            def _color_pl(val):
+                color = '#2ecc71' if val.startswith('+') else '#e74c3c'
+                return f'color: {color}'
+
+            st.dataframe(
+                pos_df.style.map(_color_pl, subset=['P&L', 'P&L %']),
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.caption("No open positions.")
+
+        # ── Open orders ──────────────────────────────────────────────────────
+        orders = get_orders('open')
+        if orders:
+            st.markdown("<div class='section-label'>Pending Orders</div>", unsafe_allow_html=True)
+            ord_rows = [{'Symbol': o.get('symbol'), 'Side': o.get('side','').upper(),
+                         'Type': o.get('type',''), 'Qty': o.get('qty'),
+                         'Status': o.get('status','')} for o in orders]
+            st.dataframe(pd.DataFrame(ord_rows), use_container_width=True, hide_index=True)
+
+    # ── Trade log ────────────────────────────────────────────────────────────
+    st.markdown("<div class='section-label'>Decision Log</div>", unsafe_allow_html=True)
+    trades = get_trade_log()
+    if trades:
+        log_rows = []
+        for t in reversed(trades[-50:]):
+            ts  = t.get('ts', '')[:16].replace('T', ' ')
+            act = t.get('action', 'hold').upper()
+            log_rows.append({
+                'Time':       ts,
+                'Ticker':     t.get('ticker', ''),
+                'Action':     act,
+                'Conf':       t.get('confidence', ''),
+                'Score':      t.get('score', ''),
+                'Spot':       f"${t.get('spot', 0):.2f}",
+                'Executed':   '✓' if t.get('executed') else '–',
+                'Reasoning':  t.get('reasoning', ''),
+            })
+        st.dataframe(pd.DataFrame(log_rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No trades logged yet. Run a trade cycle to start.")

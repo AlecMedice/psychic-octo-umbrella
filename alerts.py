@@ -22,6 +22,8 @@ import json
 import logging
 import os
 import threading
+from datetime import time
+from datetime import datetime
 from pathlib import Path
 
 import requests as _requests
@@ -176,6 +178,26 @@ def check_and_alert(seed_only: bool = False):
 
 # ── Scheduler ──────────────────────────────────────────────────────────────────
 
+def _market_hours() -> bool:
+    """True if current ET time is within regular market hours Mon–Fri."""
+    from datetime import timezone, timedelta
+    et_now = datetime.now(timezone(timedelta(hours=-4)))  # ET (approx; ignores DST edge)
+    if et_now.weekday() >= 5:
+        return False
+    return time(9, 30) <= et_now.time() <= time(16, 0)
+
+
+def _maybe_trade():
+    """Run trade cycle only during market hours."""
+    if not _market_hours():
+        return
+    try:
+        from trader import run_trading_cycle
+        run_trading_cycle()
+    except Exception as e:
+        log.warning('Trading cycle error: %s', e)
+
+
 def start_scheduler() -> BackgroundScheduler:
     """Start the background polling job. Call once via @st.cache_resource."""
     # On first run: seed without alerting, then schedule normal polls.
@@ -187,6 +209,8 @@ def start_scheduler() -> BackgroundScheduler:
     scheduler = BackgroundScheduler(daemon=True)
     scheduler.add_job(check_and_alert, 'interval', seconds=_POLL_SECONDS,
                       id='political_alert', max_instances=1)
+    scheduler.add_job(_maybe_trade, 'interval', seconds=300,
+                      id='ai_trader', max_instances=1)
     scheduler.start()
-    log.info('Political alert scheduler started (every %ds)', _POLL_SECONDS)
+    log.info('Schedulers started: political alerts every %ds, trade cycle every 300s', _POLL_SECONDS)
     return scheduler
