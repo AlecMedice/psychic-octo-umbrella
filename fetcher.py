@@ -605,3 +605,38 @@ def get_news(ticker: str, max_per_source: int = 8) -> list:
     # Sort newest first
     unique.sort(key=lambda x: x['_ts'], reverse=True)
     return unique
+
+
+# ── Political / macro feed ─────────────────────────────────────────────────────
+# Market-moving political posts (e.g. Trump on Truth Social). Truth Social has no
+# official API; trumpstruth.org publishes a public RSS archive. Override with
+# TRUTH_SOCIAL_RSS_URL to point at your own feed/proxy (TruthPing, TweetStream…).
+POLITICAL_RSS_URL = os.getenv('TRUTH_SOCIAL_RSS_URL', 'https://trumpstruth.org/feed')
+
+
+def get_political_news(limit: int = 15) -> list:
+    """Recent market-moving political posts — macro, not ticker-specific.
+
+    Returns items in the same schema as get_news() so the UI renders them
+    consistently. `sentiment` is left blank here; classification (category,
+    direction, affected tickers) is layered on separately by the AI agent.
+    """
+    out = []
+    try:
+        feed = feedparser.parse(POLITICAL_RSS_URL)
+        for e in feed.entries[:limit]:
+            parsed_time = e.get('published_parsed')
+            ts   = calendar.timegm(parsed_time) if parsed_time else 0
+            body = re.sub(r'<[^>]+>', ' ', e.get('summary', '') or '')
+            body = re.sub(r'\s+', ' ', body).strip()
+            text = (e.get('title') or '').strip() or body
+            link = e.get('link', '')
+            if text:
+                out.append(_make_item(
+                    text, link, 'Truth Social', ts,
+                    summary=body, source='Truth Social',
+                ))
+    except Exception:
+        pass
+    out.sort(key=lambda x: x['_ts'], reverse=True)
+    return out

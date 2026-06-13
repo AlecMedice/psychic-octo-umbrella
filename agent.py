@@ -1,4 +1,5 @@
 import os
+import json
 import time
 from typing import Generator
 
@@ -108,3 +109,57 @@ def stream_response(messages: list, ctx: dict) -> Generator[str, None, None]:
             break
 
     yield f"_(Rate limited — please try again in a moment.)_" if '429' in str(last_error) else f"Error: {last_error}"
+
+
+def classify_political_posts(texts: list, watchlist: list) -> list:
+    """Tag market-moving political posts for likely equity impact.
+
+    One batched Gemini call. Returns a list aligned by index with `texts`;
+    each element is a dict (or {} on failure) shaped like:
+        {
+          'category':  'Tariffs/Trade'|'Geopolitics'|'Fed/Monetary'|'Corporate'|'Other',
+          'direction': 'risk-on'|'risk-off'|'neutral',   # broad equity bias
+          'tickers':   [{'ticker': str, 'bias': 'up'|'down'}, ...],  # from watchlist
+          'rationale': str,
+        }
+    """
+    global _last_request_at
+
+    if not agent_configured() or not texts:
+        return [{} for _ in texts]
+
+    elapsed = time.time() - _last_request_at
+    if elapsed < _MIN_INTERVAL:
+        time.sleep(_MIN_INTERVAL - elapsed)
+
+    client   = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
+    numbered = '\n'.join(f'{i}. {t}' for i, t in enumerate(texts))
+    prompt = (
+        "You are a markets analyst. For each numbered post below, assess its likely "
+        "near-term impact on US equities. Return a JSON array aligned by index with "
+        "the posts. Each element is an object with:\n"
+        '  "category": one of "Tariffs/Trade", "Geopolitics", "Fed/Monetary", "Corporate", "Other"\n'
+        '  "direction": "risk-on", "risk-off", or "neutral" (broad equity bias)\n'
+        f'  "tickers": array of {{"ticker","bias"}} drawn ONLY from this watchlist {watchlist}; '
+        'bias is "up" or "down". Include only names the post clearly affects, else []\n'
+        '  "rationale": one short sentence (no trade advice).\n\n'
+        f"Posts:\n{numbered}"
+    )
+
+    config = types.GenerateContentConfig(
+        response_mime_type='application/json',
+        max_output_tokens=1500,
+    )
+
+    try:
+        _last_request_at = time.time()
+        resp = client.models.generate_content(
+            model='gemini-2.0-flash', contents=prompt, config=config,
+        )
+        data = json.loads(resp.text)
+        if not isinstance(data, list):
+            return [{} for _ in texts]
+        return [data[i] if i < len(data) and isinstance(data[i], dict) else {}
+                for i in range(len(texts))]
+    except Exception:
+        return [{} for _ in texts]

@@ -8,10 +8,11 @@ from fetcher import (
     get_options_chain, get_spot_price, get_iv_rank,
     get_expirations, get_price_history, get_previous_close, get_news,
     get_fear_greed, get_vix_term_structure, get_earnings_date, get_short_interest,
+    get_political_news,
     alpaca_configured, tradier_configured,
 )
 from greeks_calc import enrich_with_greeks, VOLLIB_OK
-from agent import agent_configured, stream_response
+from agent import agent_configured, stream_response, classify_political_posts
 from signals import (
     implied_move, put_call_ratios, iv_skew, unusual_volume,
     iv_vs_rv, relative_volume, momentum, opportunity_score,
@@ -117,6 +118,14 @@ def load_earnings(ticker):
 def load_short_interest(ticker):
     return get_short_interest(ticker)
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_political_news():
+    return get_political_news()
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_political_classification(texts, watchlist):
+    return classify_political_posts(list(texts), list(watchlist))
+
 
 # ── Sidebar: ticker, filters, news ────────────────────────────────────────────
 SOURCE_COLORS = {
@@ -219,7 +228,9 @@ if not expirations:
 
 
 # ── Main tabs ──────────────────────────────────────────────────────────────────
-tab_chart, tab_chain, tab_signals = st.tabs(["📈  Chart", "🎯  Options Chain", "📊  Signals"])
+tab_chart, tab_chain, tab_signals, tab_political = st.tabs(
+    ["📈  Chart", "🎯  Options Chain", "📊  Signals", "🏛️  Political"]
+)
 
 
 # ─────────────────────────────── TAB 1: CHART ─────────────────────────────────
@@ -590,6 +601,107 @@ with tab_signals:
             plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
         )
         st.plotly_chart(fig_iv, use_container_width=True)
+
+
+# ──────────────────────────── TAB 4: POLITICAL ───────────────────────────────
+with tab_political:
+    st.markdown(
+        "<div class='section-label'>Market-Moving Political Feed</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Trump / Truth Social posts via public RSS archive · AI-tagged for likely "
+        "market impact and affected watchlist names. Signal only — not trade advice."
+    )
+
+    posts = load_political_news()
+    if not posts:
+        st.info(
+            "No political feed available right now. Set `TRUTH_SOCIAL_RSS_URL` in `.env` "
+            "to point at a feed/proxy (e.g. trumpstruth.org, TruthPing, TweetStream)."
+        )
+    else:
+        # Classify the most recent posts (bounded for latency + token cost)
+        recent = posts[:10]
+        if agent_configured():
+            tags = load_political_classification(
+                tuple(p['title'] for p in recent), tuple(WATCHLIST)
+            )
+        else:
+            tags = [{} for _ in recent]
+            st.caption("Add `GEMINI_API_KEY` to enable AI category / ticker tagging.")
+
+        CAT_COLORS = {
+            'Tariffs/Trade': '#FF9500', 'Geopolitics': '#FF5000',
+            'Fed/Monetary':  '#0EA5E9', 'Corporate':   '#A855F7',
+            'Other':         '#666',
+        }
+        DIR_STYLE = {
+            'risk-on':  ('#00C805', 'RISK-ON'),
+            'risk-off': ('#FF5000', 'RISK-OFF'),
+            'neutral':  ('#888',    'NEUTRAL'),
+        }
+
+        for post, tag in zip(recent, tags):
+            cat       = tag.get('category', '')
+            cat_color = CAT_COLORS.get(cat, '#444')
+            dir_color, dir_label = DIR_STYLE.get(tag.get('direction', ''), ('#666', ''))
+
+            badges = ''
+            if cat:
+                badges += (
+                    f"<span style='background:{cat_color};color:#000;font-size:0.65rem;"
+                    f"font-weight:700;padding:2px 7px;border-radius:4px;margin-right:6px'>{cat}</span>"
+                )
+            if dir_label:
+                badges += (
+                    f"<span style='border:1px solid {dir_color};color:{dir_color};font-size:0.65rem;"
+                    f"font-weight:700;padding:1px 6px;border-radius:4px'>{dir_label}</span>"
+                )
+
+            # Affected watchlist tickers — ring-highlight the one currently selected
+            tk_html = ''
+            for t in (tag.get('tickers') or []):
+                tkr  = t.get('ticker', '')
+                bias = t.get('bias', '')
+                if not tkr:
+                    continue
+                arrow   = '▲' if bias == 'up' else ('▼' if bias == 'down' else '')
+                b_color = '#00C805' if bias == 'up' else ('#FF5000' if bias == 'down' else '#888')
+                ring    = '#00C805' if tkr == selected else '#1e1e1e'
+                tk_html += (
+                    f"<span style='border:1px solid {ring};color:{b_color};font-size:0.72rem;"
+                    f"font-weight:600;padding:1px 7px;border-radius:4px;margin-right:5px'>"
+                    f"{arrow} {tkr}</span>"
+                )
+            tk_block = f"<div style='margin-top:8px'>{tk_html}</div>" if tk_html else ''
+
+            rationale = tag.get('rationale', '')
+            rat_block = (
+                f"<div style='font-size:0.74rem;color:#888;margin-top:6px;font-style:italic'>"
+                f"{rationale}</div>" if rationale else ''
+            )
+
+            when  = post.get('when', '')
+            link  = post.get('url', '')
+            title = post['title']
+            title_html = (
+                f"<a href='{link}' target='_blank' style='color:#ddd;text-decoration:none'>{title}</a>"
+                if link else title
+            )
+
+            st.markdown(
+                f"<div style='background:#0d0d0d;border:1px solid #1e1e1e;"
+                f"border-left:3px solid {cat_color};border-radius:0 8px 8px 0;"
+                f"padding:12px 14px;margin-bottom:10px'>"
+                f"<div style='display:flex;justify-content:space-between;align-items:center;"
+                f"margin-bottom:8px'><div>{badges}</div>"
+                f"<span style='color:#555;font-size:0.7rem'>{when}</span></div>"
+                f"<div style='font-size:0.88rem;line-height:1.45;color:#ddd'>{title_html}</div>"
+                f"{tk_block}{rat_block}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
 
 # ── AI Agent sidebar (placed last: needs chain variables) ──────────────────────
