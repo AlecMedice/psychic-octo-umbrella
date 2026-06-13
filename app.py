@@ -13,12 +13,20 @@ from fetcher import (
 )
 from greeks_calc import enrich_with_greeks, VOLLIB_OK
 from agent import agent_configured, stream_response, classify_political_posts
+from alerts import start_scheduler, telegram_configured
 from signals import (
     implied_move, put_call_ratios, iv_skew, unusual_volume,
     iv_vs_rv, relative_volume, momentum, opportunity_score,
 )
 
 st.set_page_config(page_title="Options Evaluator", page_icon="📈", layout="wide")
+
+# Start background alert scheduler once per process (survives Streamlit reruns)
+@st.cache_resource
+def _start_alerts():
+    return start_scheduler()
+
+_start_alerts()
 
 st.markdown("""
 <style>
@@ -609,10 +617,16 @@ with tab_political:
         "<div class='section-label'>Market-Moving Political Feed</div>",
         unsafe_allow_html=True,
     )
-    st.caption(
-        "Trump / Truth Social posts via public RSS archive · AI-tagged for likely "
-        "market impact and affected watchlist names. Signal only — not trade advice."
-    )
+
+    # Alert status row
+    if telegram_configured():
+        alert_status = "🔔 Telegram alerts **active** — polling every 90s for Tariffs/Trade, Geopolitics, Fed/Monetary posts."
+    elif not agent_configured():
+        alert_status = "⚠️ Add `GEMINI_API_KEY` + `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` to `.env` to enable alerts."
+    else:
+        alert_status = "🔕 Add `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` to `.env` to enable Telegram alerts."
+    st.caption(alert_status)
+    st.caption("Trump / Truth Social via public RSS · AI-tagged for market impact · signal only, not trade advice.")
 
     posts = load_political_news()
     if not posts:
