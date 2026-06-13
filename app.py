@@ -325,8 +325,7 @@ with tab_chain:
         def _fmt_exp(d):
             dt = datetime.strptime(d, "%Y-%m-%d")
             return dt.strftime("%b %-d") if dt.year == _this_year else dt.strftime("%b %-d '%y")
-        _exp_slice = expirations[:8]
-        _exp_labels = {_fmt_exp(d): d for d in _exp_slice}
+        _exp_labels = {_fmt_exp(d): d for d in expirations}
         _selected_label = st.radio("Expiration", list(_exp_labels), horizontal=True,
                                    label_visibility="collapsed")
         expiry = _exp_labels[_selected_label]
