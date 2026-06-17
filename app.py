@@ -9,7 +9,7 @@ from fetcher import (
     get_options_chain, get_spot_price, get_iv_rank,
     get_expirations, get_price_history, get_previous_close, get_news,
     get_fear_greed, get_vix_term_structure, get_earnings_date, get_short_interest,
-    get_political_news,
+    get_political_news_for_ticker, TICKER_POLITICAL_KEYWORDS,
     alpaca_configured, tradier_configured,
 )
 from greeks_calc import enrich_with_greeks, VOLLIB_OK
@@ -133,8 +133,8 @@ def load_short_interest(ticker):
     return get_short_interest(ticker)
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_political_news():
-    return get_political_news()
+def load_political_news(ticker):
+    return get_political_news_for_ticker(ticker, days=30)
 
 @st.cache_data(ttl=900, show_spinner=False)
 def load_political_classification(texts, watchlist):
@@ -627,32 +627,39 @@ with tab_political:
         unsafe_allow_html=True,
     )
 
-    # Alert status row
+    # Alert status + filter context
     if telegram_configured():
-        alert_status = "🔔 Telegram alerts **active** — polling every 90s for Tariffs/Trade, Geopolitics, Fed/Monetary posts."
+        alert_status = "🔔 Telegram alerts **active** — polling every 90s."
     elif not agent_configured():
-        alert_status = "⚠️ Add `GEMINI_API_KEY` + `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` to `.env` to enable alerts."
+        alert_status = "⚠️ Add `GEMINI_API_KEY` + `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` to enable alerts."
     else:
         alert_status = "🔕 Add `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` to `.env` to enable Telegram alerts."
-    st.caption(alert_status)
-    st.caption("Trump / Truth Social via public RSS · AI-tagged for market impact · signal only, not trade advice.")
 
-    posts = load_political_news()
+    # Show which keywords are being matched
+    _kws = TICKER_POLITICAL_KEYWORDS.get(selected, [selected.lower()])
+    _kw_preview = ', '.join(f'"{k}"' for k in _kws[:6])
+    if len(_kws) > 6:
+        _kw_preview += f' +{len(_kws)-6} more'
+    st.caption(f"{alert_status}  ·  Matching: {_kw_preview}")
+    st.caption("Truth Social via public RSS · last 30 days · AI-tagged · signal only, not trade advice.")
+
+    posts = load_political_news(selected)
     if not posts:
         st.info(
-            "No political feed available right now. Set `TRUTH_SOCIAL_RSS_URL` in `.env` "
-            "to point at a feed/proxy (e.g. trumpstruth.org, TruthPing, TweetStream)."
+            f"No posts about **{selected}** found in the last 30 days. "
+            "Trump hasn't mentioned it recently — or the feed is temporarily unavailable. "
+            f"Set `TRUTH_SOCIAL_RSS_URL` in `.env` to use a dedicated proxy."
         )
     else:
         # Classify the most recent posts (bounded for latency + token cost)
         recent = posts[:10]
         if agent_configured():
             tags = load_political_classification(
-                tuple(p['title'] for p in recent), tuple(WATCHLIST)
+                tuple(p['title'] for p in recent), (selected,)
             )
         else:
             tags = [{} for _ in recent]
-            st.caption("Add `GEMINI_API_KEY` to enable AI category / ticker tagging.")
+            st.caption("Add `GEMINI_API_KEY` to enable AI tagging.")
 
         CAT_COLORS = {
             'Tariffs/Trade': '#FF9500', 'Geopolitics': '#FF5000',

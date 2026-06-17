@@ -640,3 +640,55 @@ def get_political_news(limit: int = 15) -> list:
         pass
     out.sort(key=lambda x: x['_ts'], reverse=True)
     return out
+
+
+# Keywords used to filter Truth Social posts to a specific ticker.
+# Lists the company name, common abbreviations, major subsidiaries, and brands
+# Trump is most likely to reference. Matching is case-insensitive substring.
+TICKER_POLITICAL_KEYWORDS: dict[str, list[str]] = {
+    'DIS':  ['disney', 'walt disney', 'espn', 'abc news', 'marvel', 'pixar',
+             'hulu', 'star wars', 'lucasfilm', 'national geographic',
+             'disneyland', 'disney world', 'disney+', 'bob iger', 'reedy creek'],
+    'JPM':  ['jpmorgan', 'jp morgan', 'j.p. morgan', 'jamie dimon',
+             'chase bank', 'jpmc'],
+    'HTZ':  ['hertz', 'dollar rent a car', 'thrifty car'],
+    'TMO':  ['thermo fisher', 'thermofisher', 'life technologies'],
+    'CAG':  ['conagra', "hunt's", 'slim jim', 'vlasic', 'bertolli',
+             "bird's eye", 'birds eye', 'healthy choice', 'marie callender',
+             'reddi whip', 'duke\'s mayo'],
+    'BA':   ['boeing', 'dreamliner', '737 max', '737max', 'starliner',
+             'kelly ortberg', 'dave calhoun'],
+    'ORCL': ['oracle', 'larry ellison', 'netsuite', 'cerner', 'tiktok oracle'],
+    'HOOD': ['robinhood', 'vlad tenev'],
+    # SPY/macro: any post that moves the broad market
+    'SPY':  ['s&p 500', 's&p500', 'stock market', 'wall street', 'nasdaq',
+             'dow jones', 'tariff', 'federal reserve', 'interest rate',
+             'inflation', 'recession', 'economy', 'trade war', 'market crash',
+             'bear market', 'bull market', 'rate cut', 'rate hike', 'powell'],
+}
+
+
+def get_political_news_for_ticker(ticker: str, days: int = 30, limit: int = 20) -> list:
+    """Truth Social posts relevant to `ticker` within the last `days` days.
+
+    Fetches a larger window from the RSS feed, then filters by keyword match
+    against the post title + summary and by publication date.
+    """
+    keywords = TICKER_POLITICAL_KEYWORDS.get(
+        ticker.upper(), [ticker.lower()]  # fallback: just the raw ticker symbol
+    )
+    cutoff   = time.time() - days * 86400
+
+    all_posts = get_political_news(limit=100)  # fetch wide, then filter down
+
+    out = []
+    for post in all_posts:
+        ts   = post.get('_ts', 0)
+        # Skip if timestamped and older than cutoff (keep ts=0 — unknown age)
+        if ts and ts < cutoff:
+            continue
+        text = (post.get('title', '') + ' ' + post.get('summary', '')).lower()
+        if any(kw.lower() in text for kw in keywords):
+            out.append(post)
+
+    return out[:limit]
