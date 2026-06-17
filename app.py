@@ -201,7 +201,7 @@ with st.sidebar:
 iv_rank = get_iv_rank(selected)
 
 # ── Header ─────────────────────────────────────────────────────────────────────
-h1, h2, h3 = st.columns([2, 3, 3])
+h1, h2 = st.columns([2, 4])
 with h1:
     st.markdown(f"## {selected}")
     ivr_color = '#FF5000' if iv_rank > 70 else ('#FF9500' if iv_rank > 50 else ('#00C805' if iv_rank < 30 else '#888'))
@@ -210,7 +210,8 @@ with h1:
         f"IV Rank {iv_rank:.1f}</span>",
         unsafe_allow_html=True,
     )
-with h3:
+with h2:
+    # Wide column so all 6 period buttons always fit on tablet/mobile
     period_label = st.radio(
         "Period", list(CHART_PERIODS.keys()), horizontal=True,
         label_visibility="collapsed",
@@ -226,19 +227,19 @@ is_up   = chg >= 0
 COLOR   = "#00C805" if is_up else "#FF5000"
 sign    = "+" if is_up else ""
 
-with h2:
-    st.markdown(
-        f"<div style='font-size:2.1rem;font-weight:700;color:{COLOR}'>${spot:.2f}</div>"
-        f"<div style='color:{COLOR}'>{sign}{chg:.2f} ({sign}{chg_pct:.2f}%)</div>",
-        unsafe_allow_html=True,
-    )
+st.markdown(
+    f"<div style='font-size:2.1rem;font-weight:700;color:{COLOR};margin-top:-4px'>${spot:.2f}"
+    f"  <span style='font-size:1rem;font-weight:400'>{sign}{chg:.2f} ({sign}{chg_pct:.2f}%)</span></div>",
+    unsafe_allow_html=True,
+)
 
-
-# ── Check options availability before tabs ────────────────────────────────────
+# ── Options data — load before tabs; safe defaults when unavailable ────────────
 expirations = get_expirations(selected)
-if not expirations:
-    st.warning(f"No options available for {selected}.")
-    st.stop()
+chain      = pd.DataFrame()
+side       = pd.DataFrame()
+atm_strike = 0.0
+expiry     = expirations[0] if expirations else ''
+opt_type   = 'call'
 
 
 # ── Main tabs ──────────────────────────────────────────────────────────────────
@@ -323,155 +324,151 @@ with tab_chart:
 
 
 # ──────────────────────────── TAB 2: OPTIONS CHAIN ────────────────────────────
+RH_GREEN = "#00C805"
+
 with tab_chain:
-    ctrl_exp, ctrl_type = st.columns([5, 1])
-    with ctrl_exp:
-        _this_year = datetime.now().year
-        def _fmt_exp(d):
-            dt = datetime.strptime(d, "%Y-%m-%d")
-            return dt.strftime("%b %-d") if dt.year == _this_year else dt.strftime("%b %-d '%y")
-        _exp_labels = {_fmt_exp(d): d for d in expirations}
-        _selected_label = st.radio("Expiration", list(_exp_labels), horizontal=True,
-                                   label_visibility="collapsed")
-        expiry = _exp_labels[_selected_label]
-    with ctrl_type:
-        opt_label = st.radio("Type", ["Calls", "Puts"], horizontal=True,
-                             label_visibility="collapsed")
-
-    opt_type = "call" if opt_label == "Calls" else "put"
-
-    with st.spinner(""):
-        chain, spot = load_chain(selected, expiry)
-
-    if chain.empty:
-        st.warning(f"No options data for {selected} — {expiry}.")
-        st.stop()
-
-    side = chain[chain['type'] == opt_type].drop_duplicates('strike').copy()
-    if min_oi > 0 and 'open_interest' in side.columns:
-        side = side[side['open_interest'] >= min_oi]
-
-    all_strikes = sorted(side['strike'].unique())
-    if not all_strikes:
-        st.warning("No contracts match current filters.")
-        st.stop()
-
-    atm_idx    = min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - spot))
-    half       = num_strikes // 2
-    shown      = all_strikes[max(0, atm_idx - half): atm_idx + half + 1]
-    atm_strike = min(shown, key=lambda s: abs(s - spot))
-
-    side = side[side['strike'].isin(shown)].copy()
-    side['mark']       = ((side['bid'] + side['ask']) / 2).round(2)
-    side['break_even'] = (
-        (side['strike'] + side['mark']) if opt_type == 'call'
-        else (side['strike'] - side['mark'])
-    ).round(2)
-    side['itm'] = side['strike'] < spot if opt_type == 'call' else side['strike'] > spot
-    side = side.sort_values('strike', ascending=(opt_type == 'call')).reset_index(drop=True)
-
-    COLS = {k: v for k, v in {
-        'strike': 'Strike', 'mark': 'Mark', 'bid': 'Bid', 'ask': 'Ask',
-        'break_even': 'Break Even', 'delta': 'Delta', 'iv': 'IV',
-        'volume': 'Volume', 'open_interest': 'OI',
-    }.items() if k in side.columns}
-
-    disp = side[list(COLS.keys())].copy()
-    disp.columns = list(COLS.values())
-
-    FMT = {k: v for k, v in {
-        'Strike': '${:.2f}', 'Mark': '${:.2f}', 'Bid': '${:.2f}', 'Ask': '${:.2f}',
-        'Break Even': '${:.2f}', 'Delta': '{:.3f}', 'IV': '{:.1%}',
-        'Volume': '{:,.0f}', 'OI': '{:,.0f}',
-    }.items() if k in disp.columns}
-
-    RH_GREEN = "#00C805"
-    ITM_BG   = 'background-color: #0a1a0a' if opt_type == 'call' else 'background-color: #1a0a0a'
-    ATM_STY  = f'background-color: #0d1f3c; font-weight: bold; border-left: 3px solid {RH_GREEN}'
-
-    def _style(df):
-        s = pd.DataFrame('', index=df.index, columns=df.columns)
-        for i in df.index:
-            strike = float(df.loc[i, 'Strike'])
-            if abs(strike - atm_strike) < 0.01:
-                s.loc[i, :] = ATM_STY
-            elif side.loc[i, 'itm']:
-                s.loc[i, :] = ITM_BG
-        return s
-
-    st.dataframe(
-        disp.style.apply(_style, axis=None).format(FMT, na_rep='—'),
-        use_container_width=True, height=400, hide_index=True,
-    )
-
-    # ── Contract detail ────────────────────────────────────────────────────────
-    st.markdown("---")
-
-    sel_strike = st.select_slider(
-        "Select strike",
-        options=sorted(side['strike'].unique()),
-        value=atm_strike,
-        format_func=lambda x: f"${x:.2f}",
-    )
-
-    hit = side[side['strike'] == sel_strike]
-    if not hit.empty:
-        r      = hit.iloc[0]
-        bid    = float(r.get('bid')  or 0)
-        ask    = float(r.get('ask')  or 0)
-        mark   = float(r.get('mark') or (bid + ask) / 2)
-        be     = float(r.get('break_even') or 0)
-        spread = ask - bid
-        sp_pct = (spread / mark * 100) if mark else 0.0
-        iv_v   = r.get('iv')
-        vol    = r.get('volume')
-        oi     = r.get('open_interest')
-
-        dot = RH_GREEN if opt_type == 'call' else "#FF5000"
-        lbl = "Call" if opt_type == 'call' else "Put"
-        tag = "ITM" if r['itm'] else "OTM"
-
-        st.markdown(
-            f"<div class='contract-title'>"
-            f"<span style='color:{dot}'>{lbl} ${sel_strike:.2f}</span>"
-            f" &nbsp;·&nbsp; {expiry}"
-            f" &nbsp;·&nbsp; <span style='color:#555;font-size:0.85rem;font-weight:400'>{tag}</span>"
-            f"</div>",
-            unsafe_allow_html=True,
+    if not expirations:
+        st.info(
+            f"No options data for {selected} right now — markets may be closed "
+            "or data is temporarily unavailable. Chart, Signals, and Political tabs still work."
         )
+    else:
+        ctrl_exp, ctrl_type = st.columns([5, 1])
+        with ctrl_exp:
+            _this_year = datetime.now().year
+            def _fmt_exp(d):
+                dt = datetime.strptime(d, "%Y-%m-%d")
+                return dt.strftime("%b %-d") if dt.year == _this_year else dt.strftime("%b %-d '%y")
+            _exp_labels = {_fmt_exp(d): d for d in expirations}
+            _selected_label = st.radio("Expiration", list(_exp_labels), horizontal=True,
+                                       label_visibility="collapsed")
+            expiry = _exp_labels[_selected_label]
+        with ctrl_type:
+            opt_label = st.radio("Type", ["Calls", "Puts"], horizontal=True,
+                                 label_visibility="collapsed")
+        opt_type = "call" if opt_label == "Calls" else "put"
 
-        def _f(v, spec='.4f', prefix=''):
-            return f"{prefix}{float(v):{spec}}" if v is not None and not pd.isna(v) else "—"
+        with st.spinner(""):
+            chain, spot = load_chain(selected, expiry)
 
-        g1, g2, g3 = st.columns(3)
+        if chain.empty:
+            st.warning(f"No options data for {selected} — {expiry}.")
+        else:
+            _side_raw = chain[chain['type'] == opt_type].drop_duplicates('strike').copy()
+            if min_oi > 0 and 'open_interest' in _side_raw.columns:
+                _side_raw = _side_raw[_side_raw['open_interest'] >= min_oi]
+            all_strikes = sorted(_side_raw['strike'].unique())
 
-        with g1:
-            st.markdown("<div class='section-label'>Pricing</div>", unsafe_allow_html=True)
-            p1, p2 = st.columns(2)
-            p1.metric("Mark",  f"${mark:.2f}")
-            p2.metric("Bid",   f"${bid:.2f}")
-            p3, p4 = st.columns(2)
-            p3.metric("Ask",   f"${ask:.2f}")
-            p4.metric("Spread", f"${spread:.2f} ({sp_pct:.1f}%)")
-            st.metric("Break Even", f"${be:.2f}")
+            if not all_strikes:
+                st.warning("No contracts match current filters.")
+            else:
+                atm_idx    = min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - spot))
+                half       = num_strikes // 2
+                shown      = all_strikes[max(0, atm_idx - half): atm_idx + half + 1]
+                atm_strike = min(shown, key=lambda s: abs(s - spot))
 
-        with g2:
-            st.markdown("<div class='section-label'>Greeks</div>", unsafe_allow_html=True)
-            g_a, g_b = st.columns(2)
-            g_a.metric("IV",      f"{float(iv_v)*100:.1f}%" if iv_v else "—")
-            g_b.metric("Delta Δ", _f(r.get('delta')))
-            g_c, g_d = st.columns(2)
-            g_c.metric("Gamma Γ", _f(r.get('gamma')))
-            g_d.metric("Theta Θ", _f(r.get('theta'), prefix='$'))
-            st.metric("Vega V",   _f(r.get('vega')))
+                side = _side_raw[_side_raw['strike'].isin(shown)].copy()
+                side['mark']       = ((side['bid'] + side['ask']) / 2).round(2)
+                side['break_even'] = (
+                    (side['strike'] + side['mark']) if opt_type == 'call'
+                    else (side['strike'] - side['mark'])
+                ).round(2)
+                side['itm'] = side['strike'] < spot if opt_type == 'call' else side['strike'] > spot
+                side = side.sort_values('strike', ascending=(opt_type == 'call')).reset_index(drop=True)
 
-        with g3:
-            st.markdown("<div class='section-label'>Activity</div>", unsafe_allow_html=True)
-            st.metric("Volume",        f"{int(vol):,}" if vol and not pd.isna(vol) else "—")
-            st.metric("Open Interest", f"{int(oi):,}"  if oi  and not pd.isna(oi)  else "—")
-            st.metric("Bid/Ask Width", f"{sp_pct:.1f}%")
+                COLS = {k: v for k, v in {
+                    'strike': 'Strike', 'mark': 'Mark', 'bid': 'Bid', 'ask': 'Ask',
+                    'break_even': 'Break Even', 'delta': 'Delta', 'iv': 'IV',
+                    'volume': 'Volume', 'open_interest': 'OI',
+                }.items() if k in side.columns}
+                disp = side[list(COLS.keys())].copy()
+                disp.columns = list(COLS.values())
+                FMT = {k: v for k, v in {
+                    'Strike': '${:.2f}', 'Mark': '${:.2f}', 'Bid': '${:.2f}', 'Ask': '${:.2f}',
+                    'Break Even': '${:.2f}', 'Delta': '{:.3f}', 'IV': '{:.1%}',
+                    'Volume': '{:,.0f}', 'OI': '{:,.0f}',
+                }.items() if k in disp.columns}
 
-    st.caption("IV Rank from 52-week realized vol · Greeks via vollib (Black-Scholes) when not from exchange")
+                ITM_BG  = 'background-color: #0a1a0a' if opt_type == 'call' else 'background-color: #1a0a0a'
+                ATM_STY = f'background-color: #0d1f3c; font-weight: bold; border-left: 3px solid {RH_GREEN}'
+
+                def _style(df):
+                    s = pd.DataFrame('', index=df.index, columns=df.columns)
+                    for i in df.index:
+                        if abs(float(df.loc[i, 'Strike']) - atm_strike) < 0.01:
+                            s.loc[i, :] = ATM_STY
+                        elif side.loc[i, 'itm']:
+                            s.loc[i, :] = ITM_BG
+                    return s
+
+                st.dataframe(
+                    disp.style.apply(_style, axis=None).format(FMT, na_rep='—'),
+                    use_container_width=True, height=400, hide_index=True,
+                )
+
+                # ── Contract detail ────────────────────────────────────────────
+                st.markdown("---")
+                sel_strike = st.select_slider(
+                    "Select strike",
+                    options=sorted(side['strike'].unique()),
+                    value=atm_strike,
+                    format_func=lambda x: f"${x:.2f}",
+                )
+
+                hit = side[side['strike'] == sel_strike]
+                if not hit.empty:
+                    r      = hit.iloc[0]
+                    bid    = float(r.get('bid')  or 0)
+                    ask    = float(r.get('ask')  or 0)
+                    mark   = float(r.get('mark') or (bid + ask) / 2)
+                    be     = float(r.get('break_even') or 0)
+                    spread = ask - bid
+                    sp_pct = (spread / mark * 100) if mark else 0.0
+                    iv_v   = r.get('iv')
+                    vol    = r.get('volume')
+                    oi     = r.get('open_interest')
+
+                    dot  = RH_GREEN if opt_type == 'call' else "#FF5000"
+                    lbl  = "Call" if opt_type == 'call' else "Put"
+                    ctag = "ITM" if r['itm'] else "OTM"
+                    st.markdown(
+                        f"<div class='contract-title'>"
+                        f"<span style='color:{dot}'>{lbl} ${sel_strike:.2f}</span>"
+                        f" &nbsp;·&nbsp; {expiry}"
+                        f" &nbsp;·&nbsp; <span style='color:#555;font-size:0.85rem;font-weight:400'>{ctag}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                    def _f(v, spec='.4f', prefix=''):
+                        return f"{prefix}{float(v):{spec}}" if v is not None and not pd.isna(v) else "—"
+
+                    g1, g2, g3 = st.columns(3)
+                    with g1:
+                        st.markdown("<div class='section-label'>Pricing</div>", unsafe_allow_html=True)
+                        p1, p2 = st.columns(2)
+                        p1.metric("Mark",  f"${mark:.2f}")
+                        p2.metric("Bid",   f"${bid:.2f}")
+                        p3, p4 = st.columns(2)
+                        p3.metric("Ask",   f"${ask:.2f}")
+                        p4.metric("Spread", f"${spread:.2f} ({sp_pct:.1f}%)")
+                        st.metric("Break Even", f"${be:.2f}")
+                    with g2:
+                        st.markdown("<div class='section-label'>Greeks</div>", unsafe_allow_html=True)
+                        g_a, g_b = st.columns(2)
+                        g_a.metric("IV",      f"{float(iv_v)*100:.1f}%" if iv_v else "—")
+                        g_b.metric("Delta Δ", _f(r.get('delta')))
+                        g_c, g_d = st.columns(2)
+                        g_c.metric("Gamma Γ", _f(r.get('gamma')))
+                        g_d.metric("Theta Θ", _f(r.get('theta'), prefix='$'))
+                        st.metric("Vega V",   _f(r.get('vega')))
+                    with g3:
+                        st.markdown("<div class='section-label'>Activity</div>", unsafe_allow_html=True)
+                        st.metric("Volume",        f"{int(vol):,}" if vol and not pd.isna(vol) else "—")
+                        st.metric("Open Interest", f"{int(oi):,}"  if oi  and not pd.isna(oi)  else "—")
+                        st.metric("Bid/Ask Width", f"{sp_pct:.1f}%")
+
+        st.caption("IV Rank from 52-week realized vol · Greeks via vollib (Black-Scholes) when not from exchange")
 
 
 # ──────────────────────────── TAB 3: SIGNALS ──────────────────────────────────
@@ -761,8 +758,10 @@ with st.sidebar:
             st.session_state.agent_messages.append(
                 {'role': 'user', 'content': user_input.strip()}
             )
-            atm_row = side[side['strike'] == atm_strike]
-            _r_atm  = atm_row.iloc[0] if not atm_row.empty else None
+            _r_atm = None
+            if not side.empty and atm_strike:
+                _atm_row = side[side['strike'] == atm_strike]
+                _r_atm   = _atm_row.iloc[0] if not _atm_row.empty else None
             agent_ctx = {
                 'ticker':         selected,
                 'spot':           spot,
