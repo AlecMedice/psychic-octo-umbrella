@@ -319,11 +319,12 @@ def get_iv_rank(ticker: str) -> float:
         return 0.0
 
 
-# Chart period → (yfinance kwargs) mapping
+# Chart period → yfinance config.
+# Use 'days'/'weeks' keys (not 'start') so dates are computed fresh each call.
 CHART_PERIODS = {
     '1D':  dict(period='1d',  interval='5m'),
-    '3D':  dict(start=(datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d'), interval='15m'),
-    '1W':  dict(start=(datetime.now() - timedelta(weeks=1)).strftime('%Y-%m-%d'), interval='30m'),
+    '3D':  dict(days=3,        interval='15m'),
+    '1W':  dict(weeks=1,       interval='30m'),
     '1M':  dict(period='1mo', interval='1h'),
     '3M':  dict(period='3mo', interval='1d'),
     '6M':  dict(period='6mo', interval='1d'),
@@ -332,8 +333,13 @@ CHART_PERIODS = {
 
 def get_price_history(ticker: str, period_label: str) -> pd.DataFrame:
     try:
-        kwargs = CHART_PERIODS.get(period_label, CHART_PERIODS['1D'])
-        return yf.Ticker(ticker).history(**kwargs)
+        cfg = dict(CHART_PERIODS.get(period_label, CHART_PERIODS['1D']))
+        # Resolve relative offsets to an absolute start date at call time
+        if 'days' in cfg:
+            cfg['start'] = (datetime.now() - timedelta(days=cfg.pop('days'))).strftime('%Y-%m-%d')
+        elif 'weeks' in cfg:
+            cfg['start'] = (datetime.now() - timedelta(weeks=cfg.pop('weeks'))).strftime('%Y-%m-%d')
+        return yf.Ticker(ticker).history(**cfg)
     except Exception:
         return pd.DataFrame()
 

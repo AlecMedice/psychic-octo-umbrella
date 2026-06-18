@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+from plotly.subplots import make_subplots
 from datetime import datetime
 
 from fetcher import (
@@ -253,8 +254,11 @@ with tab_chart:
     _fg  = load_fear_greed()
     _vix = load_vix()
 
-    if not hist.empty:
-        short_period = period_label in ('1D', '3D', '1W')
+    if hist.empty:
+        st.info(f"No price data available for **{selected}** — {period_label}. Markets may be closed or yfinance is temporarily unavailable.")
+    else:
+        short_period = period_label in ('1D', '3D')
+        intraday     = period_label in ('1D', '3D', '1W')
         prev_close   = load_previous_close(selected)
 
         lo = float(hist['Low'].min())
@@ -265,39 +269,87 @@ with tab_chart:
         pad = (hi - lo) * 0.08 or hi * 0.01
         y_range = [lo - pad, hi + pad]
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=hist.index, y=hist['Close'],
-            mode='lines',
-            line=dict(color=COLOR, width=2),
-            fill='tozeroy' if short_period else 'none',
-            fillcolor='rgba(0,200,5,0.07)' if is_up else 'rgba(255,80,0,0.07)',
-            hovertemplate='%{x|%b %d %H:%M}<br>$%{y:.2f}<extra></extra>',
-        ))
-        ref = prev_close if (short_period and prev_close) else float(hist['Close'].iloc[0])
-        ref_label = 'Prev Close' if (short_period and prev_close) else 'Start'
+        has_volume = 'Volume' in hist.columns and hist['Volume'].sum() > 0
+
+        fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            row_heights=[0.75, 0.25],
+            vertical_spacing=0.02,
+        ) if has_volume else make_subplots(rows=1, cols=1)
+
+        price_row = 1
+
+        if intraday:
+            # Line chart for intraday / short periods
+            fig.add_trace(go.Scatter(
+                x=hist.index, y=hist['Close'],
+                mode='lines',
+                line=dict(color=COLOR, width=2),
+                fill='tozeroy' if short_period else 'none',
+                fillcolor='rgba(0,200,5,0.07)' if is_up else 'rgba(255,80,0,0.07)',
+                hovertemplate='%{x|%b %d %H:%M}<br>$%{y:.2f}<extra></extra>',
+                name='Price',
+            ), row=price_row, col=1)
+        else:
+            # Candlestick for multi-day historical periods
+            fig.add_trace(go.Candlestick(
+                x=hist.index,
+                open=hist['Open'], high=hist['High'],
+                low=hist['Low'],   close=hist['Close'],
+                increasing_line_color='#00C805', decreasing_line_color='#FF5000',
+                increasing_fillcolor='rgba(0,200,5,0.6)',
+                decreasing_fillcolor='rgba(255,80,0,0.6)',
+                name='OHLC',
+            ), row=price_row, col=1)
+
+        ref = prev_close if (intraday and prev_close) else float(hist['Close'].iloc[0])
+        ref_label = 'Prev Close' if (intraday and prev_close) else 'Open'
         fig.add_hline(
             y=ref, line_dash='dot', line_color='#555',
             annotation_text=f"{ref_label} ${ref:.2f}",
             annotation_position="right",
             annotation_font_color='#666',
+            row=price_row, col=1,
         )
+
+        if has_volume:
+            vol_colors = [
+                '#00C805' if float(hist['Close'].iloc[i]) >= float(hist['Open'].iloc[i]) else '#FF5000'
+                for i in range(len(hist))
+            ]
+            fig.add_trace(go.Bar(
+                x=hist.index, y=hist['Volume'],
+                marker_color=vol_colors,
+                marker_opacity=0.6,
+                name='Volume',
+                hovertemplate='%{x|%b %d}<br>Vol %{y:,.0f}<extra></extra>',
+            ), row=2, col=1)
+
+        tick_fmt = '%H:%M' if period_label == '1D' else '%b %d'
+        total_height = 320 if has_volume else 240
+
         fig.update_layout(
-            height=240,
+            height=total_height,
             margin=dict(l=0, r=60, t=4, b=0),
-            xaxis=dict(
-                showgrid=False, zeroline=False,
-                tickformat='%H:%M' if period_label == '1D' else '%b %d',
-                tickcolor='#444', tickfont=dict(color='#888', size=10),
-            ),
-            yaxis=dict(
-                showgrid=True, gridcolor='#1a1a1a', zeroline=False,
-                tickprefix='$', tickfont=dict(color='#888', size=10),
-                side='right', range=y_range,
-            ),
             plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
             showlegend=False,
         )
+        fig.update_xaxes(
+            showgrid=False, zeroline=False,
+            rangeslider_visible=False,
+            tickformat=tick_fmt,
+            tickcolor='#444', tickfont=dict(color='#888', size=10),
+        )
+        fig.update_yaxes(
+            showgrid=True, gridcolor='#1a1a1a', zeroline=False,
+            tickfont=dict(color='#888', size=10),
+        )
+        # Price axis: dollar prefix on right
+        fig.update_yaxes(tickprefix='$', side='right', range=y_range, row=price_row, col=1)
+        if has_volume:
+            fig.update_yaxes(tickformat='.2s', side='right', showgrid=False, row=2, col=1)
+
         st.plotly_chart(fig, use_container_width=True)
 
     # Quick stats row
